@@ -65,14 +65,15 @@ func TestLinkUnknownRouteType(t *testing.T) {
 	}
 }
 
-// TestLinkSNRAttribution verifies TRACE SNRs land on the right links, in
-// accepted-hop order.
+// TestLinkSNRAttribution verifies TRACE SNRs land on the right links. SNRs[0]
+// is the receive SNR into the first path node and is not assigned to an internal
+// path link.
 func TestLinkSNRAttribution(t *testing.T) {
 	a, b, c := pk(1), pk(2), pk(3)
 	reg := noDecay()
 	reg.ObservePathCtx(PathObservation{
 		Hash: "h1", Path: []string{a, b, c}, RouteType: "direct",
-		SNRs: []float64{7.25, -3.0}, Now: 100,
+		SNRs: []float64{99, 7.25, -3.0}, Now: 100,
 	})
 
 	ab := mustNeighbor(t, reg, a, b)
@@ -92,11 +93,11 @@ func TestLinkSNRHistoryIsDirectionalAndCapped(t *testing.T) {
 	for i := 1; i <= 6; i++ {
 		reg.ObservePathCtx(PathObservation{
 			Hash: string(rune('a' + i)), Path: []string{a, b}, RouteType: "direct",
-			SNRs: []float64{float64(i)}, Now: int64(100 + i),
+			SNRs: []float64{99, float64(i)}, Now: int64(100 + i),
 		})
 	}
-	reg.ObservePathCtx(PathObservation{Hash: "r1", Path: []string{b, a}, SNRs: []float64{-1.5}, Now: 200})
-	reg.ObservePathCtx(PathObservation{Hash: "r2", Path: []string{b, a}, SNRs: []float64{-2.5}, Now: 201})
+	reg.ObservePathCtx(PathObservation{Hash: "r1", Path: []string{b, a}, SNRs: []float64{99, -1.5}, Now: 200})
+	reg.ObservePathCtx(PathObservation{Hash: "r2", Path: []string{b, a}, SNRs: []float64{99, -2.5}, Now: 201})
 
 	fromA := mustNeighbor(t, reg, a, b)
 	wantA := []float64{2, 3, 4, 5, 6}
@@ -114,7 +115,7 @@ func TestLinkSNRHistoryIsDirectionalAndCapped(t *testing.T) {
 	}
 }
 
-func TestLinkTraceSNRsRightAlignWhenOriginSampleIsPresent(t *testing.T) {
+func TestLinkTraceSNRsSkipOriginSample(t *testing.T) {
 	mc, rip4, vrsetin, phone := pk(0x25), pk(0xc4), pk(0xc8), pk(0xf7)
 	reg := noDecay()
 
@@ -133,6 +134,22 @@ func TestLinkTraceSNRsRightAlignWhenOriginSampleIsPresent(t *testing.T) {
 	}
 	if l := mustNeighbor(t, reg, vrsetin, phone); !l.HasSNRSentByNode || l.LastSNRSentByNode != 11.75 {
 		t.Errorf("vrsetin->phone snr has=%v val=%.2f, want true/11.75", l.HasSNRSentByNode, l.LastSNRSentByNode)
+	}
+}
+
+func TestLinkPartialTraceSNRDoesNotAttachToFirstPathLink(t *testing.T) {
+	mc, rip4, vrsetin := pk(0x25), pk(0xc4), pk(0xc8)
+	reg := noDecay()
+
+	reg.ObservePathCtx(PathObservation{
+		Hash: "trace-partial",
+		Path: []string{mc, rip4, vrsetin},
+		SNRs: []float64{11.5},
+		Now:  100,
+	})
+
+	if l := mustNeighbor(t, reg, mc, rip4); l.HasSNRSentByNode || len(l.SNRSentByNode) != 0 {
+		t.Errorf("mc->rip4 should not get partial trace snr, got has=%v history=%v", l.HasSNRSentByNode, l.SNRSentByNode)
 	}
 }
 
@@ -197,9 +214,9 @@ func TestLinkPersistenceRoundTrip(t *testing.T) {
 	posOf := func(k string) (float64, float64, bool) { p, ok := pos[k]; return p[0], p[1], ok }
 
 	src := noDecay()
-	src.ObservePathCtx(PathObservation{Hash: "h1", NetworkID: "net", RouteType: "flood", Path: []string{a, b}, SNRs: []float64{9.5}, Now: 100, PosOf: posOf})
+	src.ObservePathCtx(PathObservation{Hash: "h1", NetworkID: "net", RouteType: "flood", Path: []string{a, b}, SNRs: []float64{99, 9.5}, Now: 100, PosOf: posOf})
 	pos[b] = [2]float64{60, 20}
-	src.ObservePathCtx(PathObservation{Hash: "h2", NetworkID: "net", RouteType: "direct", Path: []string{b, a}, SNRs: []float64{-4.5}, Now: 200, PosOf: posOf})
+	src.ObservePathCtx(PathObservation{Hash: "h2", NetworkID: "net", RouteType: "direct", Path: []string{b, a}, SNRs: []float64{99, -4.5}, Now: 200, PosOf: posOf})
 
 	dirty := src.TakeDirty()
 	if err := db.SaveLinks(dirty, 200); err != nil {

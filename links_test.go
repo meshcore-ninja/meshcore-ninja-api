@@ -195,7 +195,7 @@ func TestLinkRestoreMergesLiveUpdates(t *testing.T) {
 	}
 
 	reg := noDecay()
-	reg.ObservePathCtx(PathObservation{Hash: "live", NetworkID: "net-live", Path: []string{a, b}, SNRs: []float64{9}, Now: 200})
+	reg.ObservePathCtx(PathObservation{Hash: "live", NetworkID: "net-live", Path: []string{a, b}, SNRs: []float64{99, 9}, Now: 200})
 	reg.Restore([]LinkRecord{{
 		NodeA:          key.nodeA(),
 		NodeB:          key.nodeB(),
@@ -444,9 +444,9 @@ func TestNodeLinksEndpoint(t *testing.T) {
 func TestNodeLinksEndpointReturnsDirectionalSNRHistory(t *testing.T) {
 	a, b := pk(0xa1), pk(0xb1)
 	reg := noDecay()
-	reg.ObservePathCtx(PathObservation{Hash: "h1", Path: []string{a, b}, SNRs: []float64{1.234}, Now: 1000})
-	reg.ObservePathCtx(PathObservation{Hash: "h2", Path: []string{a, b}, SNRs: []float64{2.345}, Now: 1001})
-	reg.ObservePathCtx(PathObservation{Hash: "h3", Path: []string{b, a}, SNRs: []float64{-7.891}, Now: 1002})
+	reg.ObservePathCtx(PathObservation{Hash: "h1", Path: []string{a, b}, SNRs: []float64{99, 1.234}, Now: 1000})
+	reg.ObservePathCtx(PathObservation{Hash: "h2", Path: []string{a, b}, SNRs: []float64{99, 2.345}, Now: 1001})
+	reg.ObservePathCtx(PathObservation{Hash: "h3", Path: []string{b, a}, SNRs: []float64{99, -7.891}, Now: 1002})
 
 	nodes := newNodeRegistry(defaultAdvertsPerNode)
 	srv := NewServer(NewStore(nil), nodes, newObserverRegistry(), reg, newImportRegistry(), nil, nil, nil, nil, nil, "*")
