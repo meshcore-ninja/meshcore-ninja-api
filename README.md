@@ -95,9 +95,9 @@ docker compose up --build
 
 The image downloads network definitions from `data_url`, listens on `:8080`,
 and stores SQLite state at `/app/state/meshcore.db` by default. The Compose file
-bind-mounts that state directory to local `./data`. Mount your own
-TOML file over `/app/config.toml` to change these settings. The built-in
-container config comes from `config.docker.example.toml`.
+bind-mounts local `./config.toml` to `/app/config.toml` and stores state in
+local `./data`. The built-in container config comes from
+`config.docker.example.toml` when no override is mounted.
 
 ## Configuration
 
