@@ -69,6 +69,39 @@ durable activity log. It flushes to SQLite on its own shorter interval
 (`--observer-persist-interval`, default `12s`) so "latest activity" stays close to
 real time.
 
+### Links
+
+A **link** is an undirected pair of nodes that appeared *adjacent* in a packet's
+resolved path (`A→B→C` yields `A—B` and `B—C`). Links are aggregated globally and
+deduplicated by `(packet hash, link)` across observers and networks, with a 24h
+half-life activity score so recent traffic dominates. Each link (served by
+`GET /api/nodes/{pubkey}/links`) carries diagnostic context beyond the bare count:
+
+- **Direction** — `sentByNode` / `recvByNode` split the counted packets by which
+  way they travelled relative to the queried node (path order = propagation
+  direction: a node *received* the packet from its predecessor). Exposes one-way
+  (asymmetric) links and who relays to whom.
+- **Geometry** — the endpoints' GPS positions **at observation time**, resolved
+  from the node registry. A link keeps one *position segment* while both ends stay
+  put (within 1 km); when either moves, the old segment is frozen into history and
+  a fresh one opens. `geometry.moved` / `geometry.segments` flag that a link's
+  drawn position may be stale because an endpoint relocated — old geometry is kept
+  for the record rather than deleted.
+- **Source route types** — `sources` breaks the events down by packet route type
+  (`flood`, `direct`, `transport_flood`, `transport_direct`, `unknown`). Only
+  **flood** (and TRACE) paths are *observed* adjacency accumulated hop-by-hop;
+  **direct** paths are pre-computed routes the sender declared, so a link seen
+  only via `direct` may never have been a real RF hop. This is the primary lens
+  for spotting unrealistic connections.
+- **Last packet hash** — `lastHash` is the content hash of the most recent packet
+  counted on the link, so a suspicious link traces back to a concrete packet.
+- **SNR** — for `TRACE` packets (which accumulate a received-SNR byte per hop),
+  the per-hop SNR is attributed to each link best-effort as `lastSnr` (dB).
+
+The route type comes from the packet header (`raw_hex`); TRACE SNRs from the
+`meshpkt` TRACE decoder. All of the above persist to `links.db` and are restored
+on startup.
+
 ## Run
 
 ```bash

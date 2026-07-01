@@ -78,6 +78,22 @@ type linkNetwork struct {
 	LastSeen  int64
 }
 
+// linkPosEpsilonKM is how far either endpoint must move before the link's
+// current position segment is closed and a new one opened. Below this, movement
+// is treated as GPS jitter and folded into the current segment.
+const linkPosEpsilonKM = 1.0
+
+// linkPosSegment is one period during which both endpoints stayed put (within
+// linkPosEpsilonKM). When a node moves, the live segment is frozen into history
+// so the link's earlier geometry is kept "for the record".
+type linkPosSegment struct {
+	LatA, LonA  float64
+	LatB, LonB  float64
+	FirstSeen   int64
+	LastSeen    int64
+	PacketCount uint64
+}
+
 // LinkRecord is the sparse aggregate for one observed link. Only links that have
 // actually been seen exist — there is no N×N matrix. Storage grows solely with
 // observed links.
@@ -91,7 +107,37 @@ type LinkRecord struct {
 	Score          float64 // recent-activity score at ScoreUpdatedAt (pre-decay)
 	ScoreUpdatedAt int64
 	Networks       []linkNetwork // networks this link was observed through
-	dirty          bool          // pending persistence
+
+	// LastHash is the content hash of the most recent packet counted on this link,
+	// so a suspicious link can be traced back to a concrete source packet.
+	LastHash string
+	// Directional counts: DirAB is events seen travelling canonical NodeA→NodeB
+	// (i.e. B received the packet from A), DirBA the reverse. They sum to
+	// PacketCount and expose asymmetric links (who relays to whom).
+	DirAB uint64
+	DirBA uint64
+	// LastSNR is the most recent per-hop SNR (dB) attributed to this link from a
+	// TRACE packet's SNR accumulator; best-effort, valid only when HasSNR.
+	LastSNR float64
+	HasSNR  bool
+	// SourceCounts breaks the counted events down by route type
+	// ("flood", "direct", "transport_flood", "transport_direct", "unknown"), for
+	// diagnosing which packet kinds a link's adjacency actually came from —
+	// flood/trace paths are observed adjacency, direct paths are declared routes.
+	SourceCounts map[string]uint64
+
+	// Current position segment: the endpoints' positions while stationary. Valid
+	// only when HasPos (both endpoints had known GPS at observation time).
+	HasPos         bool
+	LatA, LonA     float64
+	LatB, LonB     float64
+	SegFirstSeen   int64
+	SegPacketCount uint64
+	// Segments holds prior (frozen) position segments, oldest first — the link's
+	// geometry history across endpoint moves.
+	Segments []linkPosSegment
+
+	dirty bool // pending persistence
 }
 
 // linkDedupKey is the global packet-link deduplication key: (packet content
@@ -149,20 +195,55 @@ func (r *LinkRegistry) shardFor(k linkKey) *linkShard {
 // Network association is updated even when the (hash, link) pair was already
 // counted, so a link records every network it was heard on without inflating its
 // global packet count.
+// PathObservation carries everything ObservePathCtx needs to record the links of
+// one packet's resolved path, including the diagnostic context (route type,
+// per-hop SNRs, endpoint positions) beyond the bare adjacency.
+type PathObservation struct {
+	Hash      string
+	NetworkID string
+	RouteType string // "flood","direct","transport_flood","transport_direct"; "" = unknown
+	Path      []string
+	// SNRs, when non-nil, are the per-hop SNR values (dB) decoded from a TRACE
+	// packet's accumulator (one entry per forwarding hop). They are attributed to
+	// links in accepted-hop order, best-effort — exact firmware alignment isn't
+	// guaranteed, so treat per-link SNR as indicative.
+	SNRs []float64
+	Now  int64
+	// PosOf resolves a node's current position; nil disables position stamping.
+	PosOf func(pubkeyHex string) (lat, lon float64, ok bool)
+}
+
+// ObservePath records the adjacent links of one packet's resolved path with no
+// extra context. Retained for callers (and tests) that only have the bare path.
 func (r *LinkRegistry) ObservePath(hash, networkID string, path []string, now int64) {
-	hash = strings.ToLower(strings.TrimSpace(hash))
-	if hash == "" || len(path) < 2 {
+	r.ObservePathCtx(PathObservation{Hash: hash, NetworkID: networkID, Path: path, Now: now})
+}
+
+// ObservePathCtx records the adjacent links of one packet's resolved path. It is
+// the single entry point from the collector. The packet hash drives global
+// deduplication; networkID is recorded on every touched link; Now is the receive
+// time. Direction (from→to) is taken from path order, positions from PosOf, and
+// SNRs (if present) attributed to the receiving hop.
+//
+// Processing per the spec: normalize and validate keys, collapse consecutive
+// duplicate nodes, ignore self-links, and dedup repeated links within the path.
+func (r *LinkRegistry) ObservePathCtx(o PathObservation) {
+	hash := strings.ToLower(strings.TrimSpace(o.Hash))
+	if hash == "" || len(o.Path) < 2 {
 		return
 	}
 
 	// Walk adjacent pairs of the (consecutive-dedup'd) path. We keep a per-path
-	// set so a link repeated within one path is handled once.
+	// set so a link repeated within one path is handled once. prev/cur order is
+	// the propagation direction: cur received the packet from prev.
 	var prev pubKey
+	var prevHex string
 	var havePrev bool
 	var prevRaw string
+	hop := 0 // count of accepted (normalized, de-duplicated) nodes so far
 	seen := make(map[linkKey]struct{})
 
-	for _, raw := range path {
+	for _, raw := range o.Path {
 		raw = strings.ToLower(strings.TrimSpace(raw))
 		if raw == "" {
 			continue
@@ -183,57 +264,160 @@ func (r *LinkRegistry) ObservePath(hash, networkID string, path []string, now in
 			if key, ok := canonicalKey(prev, cur); ok {
 				if _, dup := seen[key]; !dup {
 					seen[key] = struct{}{}
-					r.observeLink(key, hash, networkID, now)
+					obs := linkObs{
+						key:       key,
+						fromIsA:   bytes.Equal(key[:32], prev[:]), // prev is canonical NodeA?
+						hash:      hash,
+						networkID: o.NetworkID,
+						routeType: o.RouteType,
+						now:       o.Now,
+					}
+					obs.setPositions(o.PosOf, prevHex, raw)
+					// SNR for the link ending at cur is the accumulator entry for
+					// this forwarding hop (hop-1, since the origin records none).
+					if idx := hop - 1; idx >= 0 && idx < len(o.SNRs) {
+						obs.snr, obs.hasSNR = o.SNRs[idx], true
+					}
+					r.observeLink(obs)
 				}
 			}
 		}
 		prev = cur
+		prevHex = raw
 		prevRaw = raw
 		havePrev = true
+		hop++
+	}
+}
+
+// linkObs is one resolved adjacency to record: the canonical link key, the
+// propagation direction, and the diagnostic context for this observation.
+type linkObs struct {
+	key        linkKey
+	fromIsA    bool // whether the "from" (sending) endpoint is canonical NodeA
+	hash       string
+	networkID  string
+	routeType  string
+	now        int64
+	hasPos     bool
+	latA, lonA float64
+	latB, lonB float64
+	snr        float64
+	hasSNR     bool
+}
+
+// setPositions resolves both endpoints' positions (in canonical A/B order) via
+// posOf. Positions are only stamped when both endpoints have a known location.
+func (o *linkObs) setPositions(posOf func(string) (float64, float64, bool), fromHex, toHex string) {
+	if posOf == nil {
+		return
+	}
+	fLat, fLon, fok := posOf(fromHex)
+	tLat, tLon, tok := posOf(toHex)
+	if !fok || !tok {
+		return
+	}
+	o.hasPos = true
+	if o.fromIsA {
+		o.latA, o.lonA, o.latB, o.lonB = fLat, fLon, tLat, tLon
+	} else {
+		o.latA, o.lonA, o.latB, o.lonB = tLat, tLon, fLat, fLon
 	}
 }
 
 // observeLink applies one (already de-duplicated within its path) adjacent link
 // observation: upserts the record, always records the network, and increments the
 // global packet count + activity score only when this (hash, link) pair is new
-// within the dedup window.
-func (r *LinkRegistry) observeLink(key linkKey, hash, networkID string, now int64) {
-	sh := r.shardFor(key)
+// within the dedup window. Direction, source route type, last hash, SNR, and
+// position segments are updated on the same counted events.
+func (r *LinkRegistry) observeLink(o linkObs) {
+	sh := r.shardFor(o.key)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 
-	rec := sh.links[key]
+	rec := sh.links[o.key]
 	if rec == nil {
 		rec = &LinkRecord{
-			Key:            key,
-			NodeA:          key.nodeA(),
-			NodeB:          key.nodeB(),
-			FirstSeen:      now,
-			ScoreUpdatedAt: now,
+			Key:            o.key,
+			NodeA:          o.key.nodeA(),
+			NodeB:          o.key.nodeB(),
+			FirstSeen:      o.now,
+			ScoreUpdatedAt: o.now,
 		}
-		sh.links[key] = rec
+		sh.links[o.key] = rec
 	}
 
 	// Network association is updated regardless of dedup so the link records every
 	// network it has carried this packet (and others) on.
-	if networkID != "" {
-		rec.addNetwork(networkID, now)
+	if o.networkID != "" {
+		rec.addNetwork(o.networkID, o.now)
 		rec.dirty = true
 	}
 
-	dk := linkDedupKey{hash: hash, key: key}
+	dk := linkDedupKey{hash: o.hash, key: o.key}
 	if _, dup := sh.dedup[dk]; dup {
-		sh.dedup[dk] = now // refresh so an actively-reflooded packet stays deduped
+		sh.dedup[dk] = o.now // refresh so an actively-reflooded packet stays deduped
 		return
 	}
-	sh.dedup[dk] = now
+	sh.dedup[dk] = o.now
 
-	// New globally-deduplicated packet-link event: count it and bump the score.
+	// New globally-deduplicated packet-link event. Stamp position (against the
+	// still-current LastSeen) before advancing counters so a closed segment keeps
+	// its true last-seen time.
+	if o.hasPos {
+		rec.updatePosition(o.latA, o.lonA, o.latB, o.lonB, o.now)
+	}
 	rec.PacketCount++
-	rec.LastSeen = now
-	rec.decayScore(now, r.halfLife)
+	rec.LastSeen = o.now
+	rec.decayScore(o.now, r.halfLife)
 	rec.Score++
+	rec.LastHash = o.hash
+	if o.fromIsA {
+		rec.DirAB++
+	} else {
+		rec.DirBA++
+	}
+	rt := o.routeType
+	if rt == "" {
+		rt = "unknown"
+	}
+	if rec.SourceCounts == nil {
+		rec.SourceCounts = make(map[string]uint64, 2)
+	}
+	rec.SourceCounts[rt]++
+	if o.hasSNR {
+		rec.LastSNR = o.snr
+		rec.HasSNR = true
+	}
 	rec.dirty = true
+}
+
+// updatePosition folds a new endpoint-position observation into the link's
+// current segment, or — when either endpoint has moved beyond linkPosEpsilonKM —
+// freezes the current segment into history and opens a fresh one. Called before
+// the counters advance, so a frozen segment's LastSeen reflects its last
+// stationary observation.
+func (rec *LinkRecord) updatePosition(latA, lonA, latB, lonB float64, now int64) {
+	if !rec.HasPos {
+		rec.HasPos = true
+		rec.LatA, rec.LonA, rec.LatB, rec.LonB = latA, lonA, latB, lonB
+		rec.SegFirstSeen = now
+		rec.SegPacketCount = 1
+		return
+	}
+	moved := haversineKM(rec.LatA, rec.LonA, latA, lonA) > linkPosEpsilonKM ||
+		haversineKM(rec.LatB, rec.LonB, latB, lonB) > linkPosEpsilonKM
+	if moved {
+		rec.Segments = append(rec.Segments, linkPosSegment{
+			LatA: rec.LatA, LonA: rec.LonA, LatB: rec.LatB, LonB: rec.LonB,
+			FirstSeen: rec.SegFirstSeen, LastSeen: rec.LastSeen, PacketCount: rec.SegPacketCount,
+		})
+		rec.LatA, rec.LonA, rec.LatB, rec.LonB = latA, lonA, latB, lonB
+		rec.SegFirstSeen = now
+		rec.SegPacketCount = 1
+		return
+	}
+	rec.SegPacketCount++
 }
 
 // addNetwork records (or refreshes) the network association on a link, keeping
@@ -299,6 +483,25 @@ type LinkNeighbor struct {
 	FirstSeen      int64    // global first observation of the link
 	LastSeen       int64    // global last counted observation
 	Networks       []string // networks the link was observed through, first-seen order
+
+	// Direction relative to the selected node: SentByNode counts events where the
+	// node was the sender (node→neighbor), RecvByNode where it received
+	// (neighbor→node). They sum to PacketCount.
+	SentByNode uint64
+	RecvByNode uint64
+	LastHash   string  // content hash of the most recent counted packet
+	LastSNR    float64 // best-effort per-hop SNR (dB), valid when HasSNR
+	HasSNR     bool
+	Sources    map[string]uint64 // counted events by route type
+
+	// Geometry from the current position segment, in the selected node's frame.
+	HasPos       bool
+	NodeLat      float64
+	NodeLon      float64
+	NeighborLat  float64
+	NeighborLon  float64
+	Moved        bool // true when an endpoint has moved (prior segments exist)
+	SegmentCount int  // number of frozen historical segments
 }
 
 // LinksForNode returns every observed link with the given node as an endpoint,
@@ -312,9 +515,13 @@ func (r *LinkRegistry) LinksForNode(node pubKey, now int64) []LinkNeighbor {
 		sh.mu.Lock()
 		for key, rec := range sh.links {
 			var neighbor pubKey
+			// nodeIsA: the selected node is canonical NodeA, so its outbound
+			// direction (node→neighbor) is DirAB and its position is (LatA,LonA).
+			var nodeIsA bool
 			switch {
 			case bytes.Equal(key[:32], node[:]):
 				copy(neighbor[:], key[32:])
+				nodeIsA = true
 			case bytes.Equal(key[32:], node[:]):
 				copy(neighbor[:], key[:32])
 			default:
@@ -324,14 +531,29 @@ func (r *LinkRegistry) LinksForNode(node pubKey, now int64) []LinkNeighbor {
 			for j, n := range rec.Networks {
 				nets[j] = n.NetworkID
 			}
-			out = append(out, LinkNeighbor{
+			ln := LinkNeighbor{
 				Neighbor:       hex.EncodeToString(neighbor[:]),
 				PacketCount:    rec.PacketCount,
 				RecentActivity: decayedScore(rec.Score, rec.ScoreUpdatedAt, now, r.halfLife),
 				FirstSeen:      rec.FirstSeen,
 				LastSeen:       rec.LastSeen,
 				Networks:       nets,
-			})
+				LastHash:       rec.LastHash,
+				LastSNR:        rec.LastSNR,
+				HasSNR:         rec.HasSNR,
+				Sources:        copyCounts(rec.SourceCounts),
+				HasPos:         rec.HasPos,
+				Moved:          len(rec.Segments) > 0,
+				SegmentCount:   len(rec.Segments),
+			}
+			if nodeIsA {
+				ln.SentByNode, ln.RecvByNode = rec.DirAB, rec.DirBA
+				ln.NodeLat, ln.NodeLon, ln.NeighborLat, ln.NeighborLon = rec.LatA, rec.LonA, rec.LatB, rec.LonB
+			} else {
+				ln.SentByNode, ln.RecvByNode = rec.DirBA, rec.DirAB
+				ln.NodeLat, ln.NodeLon, ln.NeighborLat, ln.NeighborLon = rec.LatB, rec.LonB, rec.LatA, rec.LonA
+			}
+			out = append(out, ln)
 		}
 		sh.mu.Unlock()
 	}
@@ -355,6 +577,8 @@ func (r *LinkRegistry) TakeDirty() []LinkRecord {
 			}
 			cp := *rec
 			cp.Networks = append([]linkNetwork(nil), rec.Networks...)
+			cp.Segments = append([]linkPosSegment(nil), rec.Segments...)
+			cp.SourceCounts = copyCounts(rec.SourceCounts)
 			out = append(out, cp)
 			rec.dirty = false
 		}
@@ -405,7 +629,11 @@ func (r *LinkRegistry) Restore(records []LinkRecord) {
 }
 
 func mergeRestoredLink(existing, restored *LinkRecord, halfLife float64) {
+	existingLast := existing.LastSeen // capture before it advances below
+
 	existing.PacketCount += restored.PacketCount
+	existing.DirAB += restored.DirAB
+	existing.DirBA += restored.DirBA
 	if existing.FirstSeen == 0 || (restored.FirstSeen > 0 && restored.FirstSeen < existing.FirstSeen) {
 		existing.FirstSeen = restored.FirstSeen
 	}
@@ -419,6 +647,50 @@ func mergeRestoredLink(existing, restored *LinkRecord, halfLife float64) {
 	for _, n := range restored.Networks {
 		existing.mergeNetwork(n)
 	}
+	// Prefer whichever side saw the most recent packet for the "last" attributes.
+	if restored.LastSeen >= existingLast {
+		if restored.LastHash != "" {
+			existing.LastHash = restored.LastHash
+		}
+		if restored.HasSNR {
+			existing.LastSNR, existing.HasSNR = restored.LastSNR, true
+		}
+	}
+	if existing.SourceCounts == nil && len(restored.SourceCounts) > 0 {
+		existing.SourceCounts = make(map[string]uint64, len(restored.SourceCounts))
+	}
+	for k, v := range restored.SourceCounts {
+		existing.SourceCounts[k] += v
+	}
+	// Fold restored geometry into history. The live side's current segment (if any)
+	// wins as "current"; the restored current + its history become older segments.
+	existing.Segments = append(existing.Segments, restored.Segments...)
+	if restored.HasPos {
+		existing.Segments = append(existing.Segments, linkPosSegment{
+			LatA: restored.LatA, LonA: restored.LonA, LatB: restored.LatB, LonB: restored.LonB,
+			FirstSeen: restored.SegFirstSeen, LastSeen: restored.LastSeen, PacketCount: restored.SegPacketCount,
+		})
+	}
+	if !existing.HasPos && restored.HasPos {
+		existing.HasPos = true
+		existing.LatA, existing.LonA, existing.LatB, existing.LonB = restored.LatA, restored.LonA, restored.LatB, restored.LonB
+		existing.SegFirstSeen, existing.SegPacketCount = restored.SegFirstSeen, restored.SegPacketCount
+		// Drop the duplicate we just appended as history.
+		existing.Segments = existing.Segments[:len(existing.Segments)-1]
+	}
+}
+
+// copyCounts returns a shallow copy of a source-count map (nil stays nil), so
+// persisted/served copies don't alias the live registry map.
+func copyCounts(m map[string]uint64) map[string]uint64 {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]uint64, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 func combinedScore(a float64, aAt int64, b float64, bAt int64, halfLife float64) float64 {

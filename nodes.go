@@ -219,6 +219,19 @@ func (r *NodeRegistry) Count() int {
 	return len(r.nodes)
 }
 
+// PositionOf returns a node's last known GPS position by pubkey (lowercase hex).
+// ok is false when the node is unknown or has no GPS. A lean helper for link
+// position stamping — it copies no slices and takes the lock only briefly.
+func (r *NodeRegistry) PositionOf(pubkey string) (lat, lon float64, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := r.nodes[pubkey]
+	if n == nil || !n.HasGPS {
+		return 0, 0, false
+	}
+	return n.Lat, n.Lon, true
+}
+
 // eachNode calls fn for every node under the registry lock. fn must only read
 // the record and must not retain the pointer; it runs on the hot registry mutex.
 // Used by the Flagger to evaluate flag rules without copying the whole registry.

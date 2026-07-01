@@ -436,6 +436,26 @@ type linkView struct {
 	FirstSeen      int64            `json:"firstSeen"`
 	LastSeen       int64            `json:"lastSeen"`
 	Networks       []string         `json:"networks"`
+	// Direction relative to the selected node: how many counted packets it sent to
+	// vs received from this neighbor. Exposes asymmetric (one-way) links.
+	SentByNode uint64            `json:"sentByNode"`
+	RecvByNode uint64            `json:"recvByNode"`
+	LastHash   string            `json:"lastHash,omitempty"` // content hash of the most recent packet on this link
+	LastSNR    *float64          `json:"lastSnr,omitempty"`  // best-effort per-hop SNR (dB) from a TRACE, if any
+	Sources    map[string]uint64 `json:"sources,omitempty"`  // counted events by route type (flood/direct/…)
+	Geometry   *linkGeometryView `json:"geometry,omitempty"` // endpoint positions at observation, if known
+}
+
+// linkGeometryView is the link's drawable geometry from the selected node's
+// frame: where each end sat when the link was observed, plus a moved flag that
+// warns the current positions may differ (an endpoint relocated since).
+type linkGeometryView struct {
+	NodeLat     float64 `json:"nodeLat"`
+	NodeLon     float64 `json:"nodeLon"`
+	NeighborLat float64 `json:"neighborLat"`
+	NeighborLon float64 `json:"neighborLon"`
+	Moved       bool    `json:"moved"`
+	Segments    int     `json:"segments"` // count of frozen historical position segments
 }
 
 // handleNodeSub routes the per-node resources:
@@ -1171,14 +1191,30 @@ func (s *Server) handleNodeLinks(w http.ResponseWriter, r *http.Request, rawPub 
 
 	views := make([]linkView, 0, len(filtered))
 	for _, l := range filtered {
-		views = append(views, linkView{
+		v := linkView{
 			Neighbor:       s.neighborView(l.Neighbor, imported),
 			PacketCount:    l.PacketCount,
 			RecentActivity: round2(l.RecentActivity),
 			FirstSeen:      l.FirstSeen,
 			LastSeen:       l.LastSeen,
 			Networks:       l.Networks,
-		})
+			SentByNode:     l.SentByNode,
+			RecvByNode:     l.RecvByNode,
+			LastHash:       l.LastHash,
+			Sources:        l.Sources,
+		}
+		if l.HasSNR {
+			snr := round2(l.LastSNR)
+			v.LastSNR = &snr
+		}
+		if l.HasPos {
+			v.Geometry = &linkGeometryView{
+				NodeLat: l.NodeLat, NodeLon: l.NodeLon,
+				NeighborLat: l.NeighborLat, NeighborLon: l.NeighborLon,
+				Moved: l.Moved, Segments: l.SegmentCount,
+			}
+		}
+		views = append(views, v)
 	}
 
 	w.Header().Set("Cache-Control", "public, max-age=15")

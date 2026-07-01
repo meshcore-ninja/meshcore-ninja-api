@@ -195,6 +195,21 @@ func OpenDB(path, linksPath string) (*DB, error) {
 		_ = linksDB.Close()
 		return nil, fmt.Errorf("init link schema: %w", err)
 	}
+	for _, m := range []struct{ col, decl string }{
+		{"last_hash", "TEXT NOT NULL DEFAULT ''"},
+		{"dir_ab", "INTEGER NOT NULL DEFAULT 0"},
+		{"dir_ba", "INTEGER NOT NULL DEFAULT 0"},
+		{"last_snr", "REAL NOT NULL DEFAULT 0"},
+		{"has_snr", "INTEGER NOT NULL DEFAULT 0"},
+		{"geo", "TEXT NOT NULL DEFAULT ''"},
+		{"sources", "TEXT NOT NULL DEFAULT '{}'"},
+	} {
+		if err := ensureColumn(linksDB, "links", m.col, m.decl); err != nil {
+			_ = sdb.Close()
+			_ = linksDB.Close()
+			return nil, fmt.Errorf("migrate links.%s: %w", m.col, err)
+		}
+	}
 	d := &DB{db: sdb, links: linksDB}
 	if err := d.initStats(); err != nil {
 		_ = sdb.Close()
@@ -369,6 +384,57 @@ func (d *DB) Save(states map[string]CounterState, now int64) error {
 	return tx.Commit()
 }
 
+// linkGeoBlob is the on-disk JSON shape for a link's position state: the current
+// segment (endpoint coordinates while stationary) plus the frozen history.
+type linkGeoBlob struct {
+	HasPos         bool             `json:"hasPos"`
+	LatA           float64          `json:"latA"`
+	LonA           float64          `json:"lonA"`
+	LatB           float64          `json:"latB"`
+	LonB           float64          `json:"lonB"`
+	SegFirstSeen   int64            `json:"segFirstSeen"`
+	SegPacketCount uint64           `json:"segPacketCount"`
+	Segments       []linkPosSegment `json:"segments,omitempty"`
+}
+
+// marshalLinkGeo serializes a link's position state, or "" when there is nothing
+// to store (no known positions and no history).
+func marshalLinkGeo(rec LinkRecord) string {
+	if !rec.HasPos && len(rec.Segments) == 0 {
+		return ""
+	}
+	b, _ := json.Marshal(linkGeoBlob{
+		HasPos: rec.HasPos, LatA: rec.LatA, LonA: rec.LonA, LatB: rec.LatB, LonB: rec.LonB,
+		SegFirstSeen: rec.SegFirstSeen, SegPacketCount: rec.SegPacketCount, Segments: rec.Segments,
+	})
+	return string(b)
+}
+
+// applyLinkGeo restores a link's position state from its stored JSON blob.
+func applyLinkGeo(rec *LinkRecord, s string) {
+	if s == "" {
+		return
+	}
+	var g linkGeoBlob
+	if json.Unmarshal([]byte(s), &g) != nil {
+		return
+	}
+	rec.HasPos = g.HasPos
+	rec.LatA, rec.LonA, rec.LatB, rec.LonB = g.LatA, g.LonA, g.LatB, g.LonB
+	rec.SegFirstSeen, rec.SegPacketCount = g.SegFirstSeen, g.SegPacketCount
+	rec.Segments = g.Segments
+}
+
+// marshalLinkSources serializes a link's per-route-type counts, normalizing the
+// empty case to "{}" so the NOT NULL column never stores "null".
+func marshalLinkSources(m map[string]uint64) string {
+	if len(m) == 0 {
+		return "{}"
+	}
+	b, _ := json.Marshal(m)
+	return string(b)
+}
+
 // marshalFlags serializes a node's flag list as a JSON array, normalizing the
 // empty/nil case to "[]" so the NOT NULL column never stores "null".
 func marshalFlags(flags []string) string {
@@ -516,14 +582,21 @@ func (d *DB) SaveLinks(records []LinkRecord, now int64) error {
 	defer tx.Rollback()
 
 	linkStmt, err := tx.Prepare(`
-		INSERT INTO links (node_a, node_b, packet_count, first_seen, last_seen, activity_score, score_updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO links (node_a, node_b, packet_count, first_seen, last_seen, activity_score, score_updated_at, last_hash, dir_ab, dir_ba, last_snr, has_snr, geo, sources)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(node_a, node_b) DO UPDATE SET
 			packet_count     = excluded.packet_count,
 			first_seen       = MIN(links.first_seen, excluded.first_seen),
 			last_seen        = MAX(links.last_seen, excluded.last_seen),
 			activity_score   = excluded.activity_score,
-			score_updated_at = excluded.score_updated_at`)
+			score_updated_at = excluded.score_updated_at,
+			last_hash        = excluded.last_hash,
+			dir_ab           = excluded.dir_ab,
+			dir_ba           = excluded.dir_ba,
+			last_snr         = excluded.last_snr,
+			has_snr          = excluded.has_snr,
+			geo              = excluded.geo,
+			sources          = excluded.sources`)
 	if err != nil {
 		return err
 	}
@@ -541,7 +614,8 @@ func (d *DB) SaveLinks(records []LinkRecord, now int64) error {
 	defer netStmt.Close()
 
 	for _, rec := range records {
-		if _, err := linkStmt.Exec(rec.NodeA, rec.NodeB, rec.PacketCount, rec.FirstSeen, rec.LastSeen, rec.Score, rec.ScoreUpdatedAt); err != nil {
+		if _, err := linkStmt.Exec(rec.NodeA, rec.NodeB, rec.PacketCount, rec.FirstSeen, rec.LastSeen, rec.Score, rec.ScoreUpdatedAt,
+			rec.LastHash, rec.DirAB, rec.DirBA, rec.LastSNR, b2i(rec.HasSNR), marshalLinkGeo(rec), marshalLinkSources(rec.SourceCounts)); err != nil {
 			return err
 		}
 		for _, n := range rec.Networks {
@@ -556,7 +630,7 @@ func (d *DB) SaveLinks(records []LinkRecord, now int64) error {
 // LoadLinks reads every persisted link aggregate plus its network associations
 // back into memory at startup.
 func (d *DB) LoadLinks() ([]LinkRecord, error) {
-	rows, err := d.links.Query(`SELECT node_a, node_b, packet_count, first_seen, last_seen, activity_score, score_updated_at FROM links`)
+	rows, err := d.links.Query(`SELECT node_a, node_b, packet_count, first_seen, last_seen, activity_score, score_updated_at, last_hash, dir_ab, dir_ba, last_snr, has_snr, geo, sources FROM links`)
 	if err != nil {
 		return nil, err
 	}
@@ -565,9 +639,20 @@ func (d *DB) LoadLinks() ([]LinkRecord, error) {
 	byPair := make(map[[2]string]*LinkRecord)
 	var out []LinkRecord
 	for rows.Next() {
-		var rec LinkRecord
-		if err := rows.Scan(&rec.NodeA, &rec.NodeB, &rec.PacketCount, &rec.FirstSeen, &rec.LastSeen, &rec.Score, &rec.ScoreUpdatedAt); err != nil {
+		var (
+			rec     LinkRecord
+			hasSNR  int
+			geo     string
+			sources string
+		)
+		if err := rows.Scan(&rec.NodeA, &rec.NodeB, &rec.PacketCount, &rec.FirstSeen, &rec.LastSeen, &rec.Score, &rec.ScoreUpdatedAt,
+			&rec.LastHash, &rec.DirAB, &rec.DirBA, &rec.LastSNR, &hasSNR, &geo, &sources); err != nil {
 			return nil, err
+		}
+		rec.HasSNR = hasSNR != 0
+		applyLinkGeo(&rec, geo)
+		if sources != "" {
+			_ = json.Unmarshal([]byte(sources), &rec.SourceCounts)
 		}
 		out = append(out, rec)
 	}

@@ -90,9 +90,26 @@ func (c *Collector) handle(data []byte) {
 
 	// Observed links: record the adjacent node pairs in the resolved path. The
 	// registry deduplicates globally by (packet hash, link) across observers and
-	// networks, so this is fed every packet (not just adverts).
+	// networks, so this is fed every packet (not just adverts). The raw header
+	// carries the route type (flood paths are observed adjacency, direct paths are
+	// declared routes) and, for TRACE packets, a per-hop SNR accumulator.
 	if c.links != nil {
-		c.links.ObservePath(hash, c.net.ID, p.ResolvedPath, now)
+		obs := PathObservation{
+			Hash:      hash,
+			NetworkID: c.net.ID,
+			Path:      p.ResolvedPath,
+			Now:       now,
+		}
+		if raw := decodeRawHex(p.RawHex); len(raw) > 0 {
+			obs.RouteType = routeTypeName(raw[0])
+			if p.PayloadType != nil && meshpkt.PayloadType(byte(*p.PayloadType)) == meshpkt.PayloadTrace {
+				obs.SNRs = traceSNRs(raw)
+			}
+		}
+		if c.nodes != nil {
+			obs.PosOf = c.nodes.PositionOf
+		}
+		c.links.ObservePathCtx(obs)
 	}
 
 	// ADVERT packets carry node identity. Decode the wire bytes locally and feed
@@ -100,6 +117,47 @@ func (c *Collector) handle(data []byte) {
 	if c.nodes != nil && p.PayloadType != nil && meshpkt.PayloadType(byte(*p.PayloadType)) == meshpkt.PayloadAdvert {
 		c.collectAdvert(p, hash, now)
 	}
+}
+
+// decodeRawHex decodes a packet's raw_hex to wire bytes, or returns nil when it
+// is absent or malformed (best-effort — many packet kinds may omit it).
+func decodeRawHex(rawHex string) []byte {
+	rawHex = strings.ToLower(strings.TrimSpace(rawHex))
+	if rawHex == "" {
+		return nil
+	}
+	raw, err := hex.DecodeString(rawHex)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+// routeTypeName maps the 2-bit route type in a packet header to a short label,
+// used to break down which packet kinds a link's adjacency came from.
+func routeTypeName(header byte) string {
+	switch meshpkt.RouteType(header & 0x03) {
+	case meshpkt.RouteTransportFlood:
+		return "transport_flood"
+	case meshpkt.RouteFlood:
+		return "flood"
+	case meshpkt.RouteDirect:
+		return "direct"
+	case meshpkt.RouteTransportDirect:
+		return "transport_direct"
+	default:
+		return ""
+	}
+}
+
+// traceSNRs decodes a TRACE packet's per-hop SNR accumulator (carried in the
+// wire path field) to dB values. Returns nil if the packet won't decode.
+func traceSNRs(raw []byte) []float64 {
+	pkt, err := meshpkt.DecodePacket(raw)
+	if err != nil || pkt.Type != meshpkt.PayloadTrace {
+		return nil
+	}
+	return meshpkt.TraceSNRs(pkt.Path)
 }
 
 // collectAdvert decodes an ADVERT's raw wire bytes and records the node. Bad or
