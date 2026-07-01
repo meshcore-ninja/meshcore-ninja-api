@@ -186,6 +186,38 @@ func TestLinkPersistRestart(t *testing.T) {
 	}
 }
 
+func TestLinkRestoreMergesLiveUpdates(t *testing.T) {
+	a, b := pk(1), pk(2)
+	key, ok := keyFromPair(a, b)
+	if !ok {
+		t.Fatal("keyFromPair failed")
+	}
+
+	reg := noDecay()
+	reg.ObservePath("live", "net-live", []string{a, b}, 200)
+	reg.Restore([]LinkRecord{{
+		NodeA:          key.nodeA(),
+		NodeB:          key.nodeB(),
+		PacketCount:    3,
+		FirstSeen:      100,
+		LastSeen:       150,
+		Score:          3,
+		ScoreUpdatedAt: 150,
+		Networks:       []linkNetwork{{NetworkID: "net-old", FirstSeen: 100, LastSeen: 150}},
+	}})
+
+	ab := mustNeighbor(t, reg, a, b)
+	if ab.PacketCount != 4 {
+		t.Errorf("merged count = %d, want 4", ab.PacketCount)
+	}
+	if ab.FirstSeen != 100 || ab.LastSeen != 200 {
+		t.Errorf("merged seen = %d/%d, want 100/200", ab.FirstSeen, ab.LastSeen)
+	}
+	if len(ab.Networks) != 2 {
+		t.Errorf("merged networks = %v, want old and live", ab.Networks)
+	}
+}
+
 // 9. The packet-link dedup cache expires according to the configured window.
 func TestLinkDedupCacheExpires(t *testing.T) {
 	a, b := pk(1), pk(2)

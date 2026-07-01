@@ -29,14 +29,21 @@ func TestStatsAPIAndMetrics(t *testing.T) {
 	if err := db.SaveNodes([]NodeRecord{{PubKey: "aa"}}, 300); err != nil {
 		t.Fatalf("SaveNodes: %v", err)
 	}
+	db.setLoadedNodeCount(1)
 	if err := db.AppendAdverts([]AdvertObservation{{PubKey: "aa", At: 100}, {PubKey: "bb", At: 200}}); err != nil {
 		t.Fatalf("AppendAdverts: %v", err)
 	}
 	if _, err := db.db.Exec(`INSERT INTO imported_nodes (public_key) VALUES ('aa'), ('cc'), ('dd')`); err != nil {
 		t.Fatalf("insert imported nodes: %v", err)
 	}
+	if err := db.refreshImportedNodeCount(); err != nil {
+		t.Fatalf("refresh imported node count: %v", err)
+	}
 	if _, err := db.db.Exec(`INSERT INTO imported_node_history (public_key, sig) VALUES ('aa', 's1'), ('cc', 's2')`); err != nil {
 		t.Fatalf("insert imported history: %v", err)
+	}
+	if err := db.refreshImportedNodeHistoryCount(); err != nil {
+		t.Fatalf("refresh imported history count: %v", err)
 	}
 
 	metrics := NewMetrics()

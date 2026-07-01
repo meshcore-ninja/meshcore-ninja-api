@@ -136,7 +136,7 @@ type statsNodeCounts struct {
 	Total    int `json:"total"`
 }
 
-func (s *Server) statsSnapshot() (statsResponse, error) {
+func (s *Server) statsSnapshot() statsResponse {
 	liveNodes := 0
 	if s.nodes != nil {
 		liveNodes = s.nodes.Count()
@@ -153,21 +153,14 @@ func (s *Server) statsSnapshot() (statsResponse, error) {
 		},
 	}
 	if s.db != nil {
-		sqlite, err := s.db.Stats()
-		if err != nil {
-			return out, err
-		}
+		sqlite := s.db.Stats()
 		out.SQLite = &sqlite
 	}
-	return out, nil
+	return out
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	stats, err := s.statsSnapshot()
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
-		return
-	}
+	stats := s.statsSnapshot()
 	w.Header().Set("Cache-Control", "public, max-age=15")
 	writeJSON(w, http.StatusOK, stats)
 }
@@ -177,10 +170,8 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	stats, err := s.statsSnapshot()
-	if err == nil {
-		s.metrics.updateStorageStats(stats.Nodes.Live, stats.Nodes.Imported, stats.SQLite)
-	}
+	stats := s.statsSnapshot()
+	s.metrics.updateStorageStats(stats.Nodes.Live, stats.Nodes.Imported, stats.SQLite)
 	s.metrics.handler().ServeHTTP(w, r)
 }
 

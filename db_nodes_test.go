@@ -70,7 +70,7 @@ func TestAppendLoadRecentAdverts(t *testing.T) {
 		t.Fatalf("AppendAdverts 2: %v", err)
 	}
 
-	recent, err := db.LoadRecentAdverts(3)
+	recent, err := db.LoadRecentAdverts([]string{"aa", "bb"}, 3)
 	if err != nil {
 		t.Fatalf("LoadRecentAdverts: %v", err)
 	}
@@ -86,5 +86,13 @@ func TestAppendLoadRecentAdverts(t *testing.T) {
 	}
 	if len(recent["bb"]) != 1 || recent["bb"][0].At != 500 {
 		t.Errorf("bb recent = %+v, want one entry at 500", recent["bb"])
+	}
+
+	recent, err = db.LoadRecentAdverts([]string{"bb"}, 3)
+	if err != nil {
+		t.Fatalf("LoadRecentAdverts targeted: %v", err)
+	}
+	if _, ok := recent["aa"]; ok {
+		t.Errorf("targeted recent included aa: %+v", recent["aa"])
 	}
 }

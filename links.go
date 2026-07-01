@@ -392,9 +392,55 @@ func (r *LinkRegistry) Restore(records []LinkRecord) {
 		rec.dirty = false
 		sh := r.shardFor(key)
 		sh.mu.Lock()
-		sh.links[key] = &rec
+		if existing := sh.links[key]; existing != nil {
+			mergeRestoredLink(existing, &rec, r.halfLife)
+		} else {
+			sh.links[key] = &rec
+		}
 		sh.mu.Unlock()
 	}
+	r.routeMu.Lock()
+	r.routeAdj = nil
+	r.routeMu.Unlock()
+}
+
+func mergeRestoredLink(existing, restored *LinkRecord, halfLife float64) {
+	existing.PacketCount += restored.PacketCount
+	if existing.FirstSeen == 0 || (restored.FirstSeen > 0 && restored.FirstSeen < existing.FirstSeen) {
+		existing.FirstSeen = restored.FirstSeen
+	}
+	if restored.LastSeen > existing.LastSeen {
+		existing.LastSeen = restored.LastSeen
+	}
+	existing.Score = combinedScore(existing.Score, existing.ScoreUpdatedAt, restored.Score, restored.ScoreUpdatedAt, halfLife)
+	if restored.ScoreUpdatedAt > existing.ScoreUpdatedAt {
+		existing.ScoreUpdatedAt = restored.ScoreUpdatedAt
+	}
+	for _, n := range restored.Networks {
+		existing.mergeNetwork(n)
+	}
+}
+
+func combinedScore(a float64, aAt int64, b float64, bAt int64, halfLife float64) float64 {
+	if bAt > aAt {
+		return decayedScore(a, aAt, bAt, halfLife) + b
+	}
+	return a + decayedScore(b, bAt, aAt, halfLife)
+}
+
+func (rec *LinkRecord) mergeNetwork(n linkNetwork) {
+	for i := range rec.Networks {
+		if rec.Networks[i].NetworkID == n.NetworkID {
+			if rec.Networks[i].FirstSeen == 0 || (n.FirstSeen > 0 && n.FirstSeen < rec.Networks[i].FirstSeen) {
+				rec.Networks[i].FirstSeen = n.FirstSeen
+			}
+			if n.LastSeen > rec.Networks[i].LastSeen {
+				rec.Networks[i].LastSeen = n.LastSeen
+			}
+			return
+		}
+	}
+	rec.Networks = append(rec.Networks, n)
 }
 
 // keyFromPair builds a canonical link key from two hex public keys.

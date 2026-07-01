@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sync/atomic"
 
 	_ "modernc.org/sqlite"
 )
@@ -12,7 +13,15 @@ import (
 // cgo) so cumulative totals and the node/observer gauges survive restarts. One
 // row per scope; the periodic flush upserts every scope inside one transaction.
 type DB struct {
-	db *sql.DB
+	db    *sql.DB
+	stats atomicStats
+}
+
+type atomicStats struct {
+	nodes               atomic.Int64
+	importedNodes       atomic.Int64
+	adverts             atomic.Int64
+	importedNodeHistory atomic.Int64
 }
 
 const counterSchema = `
@@ -166,7 +175,12 @@ func OpenDB(path string) (*DB, error) {
 		_ = sdb.Close()
 		return nil, fmt.Errorf("migrate adverts.analyzer_name: %w", err)
 	}
-	return &DB{db: sdb}, nil
+	d := &DB{db: sdb}
+	if err := d.initStats(); err != nil {
+		_ = sdb.Close()
+		return nil, fmt.Errorf("init stats: %w", err)
+	}
+	return d, nil
 }
 
 func (d *DB) Close() error { return d.db.Close() }
@@ -177,6 +191,25 @@ type SQLiteStats struct {
 	ImportedNodes       int64 `json:"importedNodes"`
 	Adverts             int64 `json:"adverts"`
 	ImportedNodeHistory int64 `json:"importedNodeHistory"`
+}
+
+func (d *DB) initStats() error {
+	for _, c := range []struct {
+		query string
+		dst   *atomic.Int64
+	}{
+		{`SELECT COUNT(*) FROM nodes`, &d.stats.nodes},
+		{`SELECT COUNT(*) FROM imported_nodes`, &d.stats.importedNodes},
+		{`SELECT COALESCE(MAX(id), 0) FROM adverts`, &d.stats.adverts},
+		{`SELECT COALESCE(MAX(id), 0) FROM imported_node_history`, &d.stats.importedNodeHistory},
+	} {
+		var n int64
+		if err := d.db.QueryRow(c.query).Scan(&n); err != nil {
+			return err
+		}
+		c.dst.Store(n)
+	}
+	return nil
 }
 
 func ensureColumn(db *sql.DB, table, column, decl string) error {
@@ -208,25 +241,41 @@ func ensureColumn(db *sql.DB, table, column, decl string) error {
 	return err
 }
 
-// Stats counts rows in the fixed persistence tables. It intentionally avoids
-// high-cardinality grouping so it stays cheap enough for API calls and scrapes.
-func (d *DB) Stats() (SQLiteStats, error) {
-	var st SQLiteStats
-	counts := []struct {
-		table string
-		dst   *int64
-	}{
-		{"nodes", &st.Nodes},
-		{"imported_nodes", &st.ImportedNodes},
-		{"adverts", &st.Adverts},
-		{"imported_node_history", &st.ImportedNodeHistory},
+// Stats returns cached durable table sizes. It does not query SQLite, so it is
+// cheap enough for API calls and Prometheus scrapes.
+func (d *DB) Stats() SQLiteStats {
+	return SQLiteStats{
+		Nodes:               d.stats.nodes.Load(),
+		ImportedNodes:       d.stats.importedNodes.Load(),
+		Adverts:             d.stats.adverts.Load(),
+		ImportedNodeHistory: d.stats.importedNodeHistory.Load(),
 	}
-	for _, c := range counts {
-		if err := d.db.QueryRow(`SELECT COUNT(*) FROM ` + c.table).Scan(c.dst); err != nil {
-			return SQLiteStats{}, err
-		}
+}
+
+func (d *DB) setLoadedNodeCount(n int) {
+	d.stats.nodes.Store(int64(n))
+}
+
+func (d *DB) setImportedNodeCount(n int) {
+	d.stats.importedNodes.Store(int64(n))
+}
+
+func (d *DB) refreshImportedNodeCount() error {
+	var n int64
+	if err := d.db.QueryRow(`SELECT COUNT(*) FROM imported_nodes`).Scan(&n); err != nil {
+		return err
 	}
-	return st, nil
+	d.stats.importedNodes.Store(n)
+	return nil
+}
+
+func (d *DB) refreshImportedNodeHistoryCount() error {
+	var n int64
+	if err := d.db.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM imported_node_history`).Scan(&n); err != nil {
+		return err
+	}
+	d.stats.importedNodeHistory.Store(n)
+	return nil
 }
 
 // Load reads every persisted scope back into memory.
@@ -360,7 +409,10 @@ func (d *DB) SaveNodes(nodes []NodeRecord, now int64) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // AppendAdverts inserts adverts into the append-only history table in one
@@ -388,7 +440,11 @@ func (d *DB) AppendAdverts(adverts []AdvertObservation) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	d.stats.adverts.Add(int64(len(adverts)))
+	return nil
 }
 
 // SaveLinks batch-upserts the given (dirty) link aggregates and their network
@@ -546,43 +602,54 @@ func (d *DB) SaveObservers(observers []ObserverRecord, now int64) error {
 	return tx.Commit()
 }
 
-// LoadRecentAdverts returns up to perNode most recent adverts per node (newest
-// first), keyed by pubkey, used to repopulate each node's in-memory rolling list
-// on startup.
-//
-// The window function runs over the covering index idx_adverts_pubkey(pubkey,
-// id) alone — selecting only `id` so SQLite never touches the multi-hundred-MB
-// row data for the 2M+ history rows — then joins back to fetch the columns for
-// just the ~perNode×nodes winners. Ordering by id DESC keeps each pubkey's slice
-// newest-first. This turns a ~75s full-table window scan into a sub-second load.
-func (d *DB) LoadRecentAdverts(perNode int) (map[string][]AdvertObservation, error) {
-	rows, err := d.db.Query(`
-		SELECT a.hash, a.raw_hex, a.pubkey, a.name, a.node_type, a.has_gps, a.lat, a.lon, a.advert_time, a.received_at, a.network_id, a.analyzer_name, a.observer_id, a.observer_name
-		FROM adverts a
-		JOIN (
-			SELECT id FROM (
-				SELECT id, ROW_NUMBER() OVER (PARTITION BY pubkey ORDER BY id DESC) AS rn FROM adverts
-			) WHERE rn <= ?
-		) recent ON recent.id = a.id
-		ORDER BY a.id DESC`, perNode)
+// LoadRecentAdverts returns up to perNode most recent adverts for each requested
+// pubkey (newest first), keyed by pubkey, used to repopulate each node's
+// in-memory rolling list on startup. It performs bounded index lookups against
+// idx_adverts_pubkey(pubkey, id) instead of ranking the whole adverts table.
+func (d *DB) LoadRecentAdverts(pubkeys []string, perNode int) (map[string][]AdvertObservation, error) {
+	if perNode <= 0 || len(pubkeys) == 0 {
+		return map[string][]AdvertObservation{}, nil
+	}
+	stmt, err := d.db.Prepare(`
+		SELECT hash, raw_hex, pubkey, name, node_type, has_gps, lat, lon, advert_time, received_at, network_id, analyzer_name, observer_id, observer_name
+		FROM adverts
+		WHERE pubkey = ?
+		ORDER BY id DESC
+		LIMIT ?`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer stmt.Close()
 
 	out := make(map[string][]AdvertObservation)
-	for rows.Next() {
-		var (
-			a      AdvertObservation
-			hasGPS int
-		)
-		if err := rows.Scan(&a.Hash, &a.RawHex, &a.PubKey, &a.Name, &a.NodeType, &hasGPS, &a.Lat, &a.Lon, &a.AdvertTime, &a.At, &a.NetworkID, &a.AnalyzerName, &a.ObserverID, &a.ObserverName); err != nil {
+	for _, pubkey := range pubkeys {
+		if pubkey == "" {
+			continue
+		}
+		rows, err := stmt.Query(pubkey, perNode)
+		if err != nil {
 			return nil, err
 		}
-		a.HasGPS = hasGPS != 0
-		out[a.PubKey] = append(out[a.PubKey], a)
+		for rows.Next() {
+			var (
+				a      AdvertObservation
+				hasGPS int
+			)
+			if err := rows.Scan(&a.Hash, &a.RawHex, &a.PubKey, &a.Name, &a.NodeType, &hasGPS, &a.Lat, &a.Lon, &a.AdvertTime, &a.At, &a.NetworkID, &a.AnalyzerName, &a.ObserverID, &a.ObserverName); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			a.HasGPS = hasGPS != 0
+			out[a.PubKey] = append(out[a.PubKey], a)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // AdvertsForNode returns one node's adverts from the append-only history table,
@@ -732,7 +799,10 @@ func (d *DB) SaveImportedNodes(nodes []*ImportedNode, now int64) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return d.refreshImportedNodeCount()
 }
 
 // LoadImportedNodes reads the mirrored directory back into memory so the map has
@@ -796,7 +866,10 @@ func (d *DB) SaveImportedNodeHistory(nodes []*ImportedNode, now int64) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return d.refreshImportedNodeHistoryCount()
 }
 
 // ImportedNodeHistory returns every captured publish for one node, newest

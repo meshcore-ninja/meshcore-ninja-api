@@ -68,6 +68,7 @@ func main() {
 	// so a slow startup points at the offending query.
 	var db *DB
 	loadAdverts := false // backfill per-node advert history in the background after startup
+	var advertBackfillPubKeys []string
 	if cfg.DBPath != "" {
 		bootStart := time.Now()
 		t := time.Now()
@@ -94,6 +95,11 @@ func main() {
 			// advert lists are backfilled asynchronously below — that history scan
 			// is the slow part and the map never needs it.
 			registry.Restore(nodes, nil)
+			db.setLoadedNodeCount(len(nodes))
+			advertBackfillPubKeys = make([]string, 0, len(nodes))
+			for i := range nodes {
+				advertBackfillPubKeys = append(advertBackfillPubKeys, nodes[i].PubKey)
+			}
 			log.Printf("startup: restored %d node row(s) in %s", len(nodes), time.Since(t).Round(time.Millisecond))
 			loadAdverts = true
 		}
@@ -107,18 +113,11 @@ func main() {
 		}
 
 		t = time.Now()
-		if lks, err := db.LoadLinks(); err != nil {
-			log.Printf("warning: loading persisted links: %v", err)
-		} else if len(lks) > 0 {
-			links.Restore(lks)
-			log.Printf("startup: restored %d link(s) in %s", len(lks), time.Since(t).Round(time.Millisecond))
-		}
-
-		t = time.Now()
 		if imp, err := db.LoadImportedNodes(); err != nil {
 			log.Printf("warning: loading imported nodes: %v", err)
 		} else if len(imp) > 0 {
 			imported.Replace(imp)
+			db.setImportedNodeCount(len(imp))
 			log.Printf("startup: restored %d imported node(s) in %s", len(imp), time.Since(t).Round(time.Millisecond))
 		}
 
@@ -128,6 +127,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	linkRestoreDone := make(chan struct{})
 	// Backfill each node's rolling latest-adverts list from the (large) history
 	// table in the background, so the server starts serving immediately. Only
 	// nodes that haven't yet heard a live advert are filled (see
@@ -135,7 +135,7 @@ func main() {
 	if db != nil && loadAdverts {
 		go func() {
 			t := time.Now()
-			recent, err := db.LoadRecentAdverts(defaultAdvertsPerNode)
+			recent, err := db.LoadRecentAdverts(advertBackfillPubKeys, defaultAdvertsPerNode)
 			if err != nil {
 				log.Printf("warning: backfilling recent adverts: %v", err)
 				return
@@ -143,6 +143,22 @@ func main() {
 			registry.AttachRecentAdverts(recent)
 			log.Printf("startup: backfilled recent adverts for %d node(s) in %s (background)", len(recent), time.Since(t).Round(time.Millisecond))
 		}()
+	}
+
+	if db != nil {
+		go func() {
+			defer close(linkRestoreDone)
+			t := time.Now()
+			lks, err := db.LoadLinks()
+			if err != nil {
+				log.Printf("warning: loading persisted links: %v", err)
+				return
+			}
+			links.Restore(lks)
+			log.Printf("startup: restored %d link(s) in %s (background)", len(lks), time.Since(t).Round(time.Millisecond))
+		}()
+	} else {
+		close(linkRestoreDone)
 	}
 
 	// Tangleveil is the only live-ingest path. It multiplexes every configured
@@ -204,6 +220,8 @@ func main() {
 					if err != nil {
 						log.Printf("node flush: %v", err)
 						registry.Requeue(dirty) // retry next cycle
+					} else {
+						db.setLoadedNodeCount(registry.Count())
 					}
 				}
 
@@ -217,14 +235,18 @@ func main() {
 						registry.ClearPending(len(pending))
 					}
 				}
-				if dirty := links.TakeDirty(); len(dirty) > 0 {
-					t = time.Now()
-					err = db.SaveLinks(dirty, now)
-					metrics.observeDBFlush("links", len(dirty), time.Since(t), err)
-					if err != nil {
-						log.Printf("link flush: %v", err)
-						links.Requeue(dirty) // retry next cycle
+				select {
+				case <-linkRestoreDone:
+					if dirty := links.TakeDirty(); len(dirty) > 0 {
+						t = time.Now()
+						err = db.SaveLinks(dirty, now)
+						metrics.observeDBFlush("links", len(dirty), time.Since(t), err)
+						if err != nil {
+							log.Printf("link flush: %v", err)
+							links.Requeue(dirty) // retry next cycle
+						}
 					}
+				default:
 				}
 			}
 			for {
