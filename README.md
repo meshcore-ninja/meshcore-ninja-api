@@ -309,10 +309,12 @@ Current rules:
 | flag | meaning |
 |------|---------|
 | `far_from_network` | The node's GPS position is more than `far_from_network_km` (default 1000 km) from the published coverage area of **every** network it has been heard on. Likely a bad GPS fix, spoofed coordinates, or a misattributed advert. |
+| `network_too_far` | The node is within reach of one of its networks but more than `far_from_network_km` from **another** network it also belongs to. A node only joins a network's set when its advert reaches that network's analyzers, so simultaneous membership in two coverage areas thousands of km apart is physically impossible — a pubkey collision or a replayed/bridged packet. Its identity and location can't be trusted. |
 
-A `far_from_network` node is **excluded from the map snapshot** — its
-coordinates would misplace it — but it still appears in `/api/nodes` (with the
-flag) and `/api/flags` so its bad location remains visible for inspection.
+Both flags mean the node's location is untrustworthy, so such nodes are
+**excluded from the map snapshot** — their coordinates would misplace them — but
+they still appear in `/api/nodes` (with the flag) and `/api/flags` so the problem
+remains visible for inspection.
 
 Coverage areas are the polygons published at `network_area_url` (a GeoJSON
 `FeatureCollection` keyed by `networkId`), reloaded every `network_area_interval`.

@@ -16,32 +16,36 @@ func newTestFlagger(t *testing.T) (*Flagger, *NodeRegistry) {
 	return NewFlagger(reg, areas, 0), reg
 }
 
-func TestIsFarFromNetwork(t *testing.T) {
+func TestLocationFlags(t *testing.T) {
 	f, _ := newTestFlagger(t)
 
 	cases := []struct {
 		name string
 		n    NodeRecord
-		want bool
+		want []string
 	}{
-		{"inside box", NodeRecord{HasGPS: true, Lat: 0, Lon: 0, Networks: []string{"box"}}, false},
-		{"far from box", NodeRecord{HasGPS: true, Lat: 40, Lon: 40, Networks: []string{"box"}}, true},
-		{"no gps", NodeRecord{HasGPS: false, Lat: 40, Lon: 40, Networks: []string{"box"}}, false},
-		{"no networks", NodeRecord{HasGPS: true, Lat: 40, Lon: 40}, false},
-		{"unknown network only", NodeRecord{HasGPS: true, Lat: 40, Lon: 40, Networks: []string{"ghost"}}, false},
-		{"far from one, near another", NodeRecord{HasGPS: true, Lat: 10, Lon: 10, Networks: []string{"box", "multi"}}, false},
-		{"far from all known", NodeRecord{HasGPS: true, Lat: 40, Lon: 40, Networks: []string{"box", "multi"}}, true},
+		{"inside box", NodeRecord{HasGPS: true, Lat: 0.5, Lon: 0.5, Networks: []string{"box"}}, nil},
+		{"far from box", NodeRecord{HasGPS: true, Lat: 40, Lon: 40, Networks: []string{"box"}}, []string{FlagFarFromNetwork}},
+		{"no gps", NodeRecord{HasGPS: false, Lat: 40, Lon: 40, Networks: []string{"box"}}, nil},
+		{"no networks", NodeRecord{HasGPS: true, Lat: 40, Lon: 40}, nil},
+		{"unknown network only", NodeRecord{HasGPS: true, Lat: 40, Lon: 40, Networks: []string{"ghost"}}, nil},
+		// Inside "box" (near) but ~10° (>1000km) from "multi" — impossible membership.
+		{"near one, far from another", NodeRecord{HasGPS: true, Lat: 0.5, Lon: 0.5, Networks: []string{"box", "multi"}}, []string{FlagNetworkTooFar}},
+		// Inside "multi" but far from "box" — symmetric case.
+		{"inside multi, far from box", NodeRecord{HasGPS: true, Lat: 10.5, Lon: 10.5, Networks: []string{"box", "multi"}}, []string{FlagNetworkTooFar}},
+		{"far from all known", NodeRecord{HasGPS: true, Lat: 40, Lon: 40, Networks: []string{"box", "multi"}}, []string{FlagFarFromNetwork}},
 	}
 	for _, c := range cases {
-		if got := f.isFarFromNetwork(&c.n); got != c.want {
-			t.Errorf("%s: isFarFromNetwork = %v, want %v", c.name, got, c.want)
+		got := f.locationFlags(&c.n)
+		if !sameFlags(got, c.want) {
+			t.Errorf("%s: locationFlags = %v, want %v", c.name, got, c.want)
 		}
 	}
 }
 
 func TestScanOnceAppliesFlags(t *testing.T) {
 	f, reg := newTestFlagger(t)
-	reg.Observe(AdvertObservation{PubKey: "near", HasGPS: true, Lat: 0, Lon: 0, NetworkID: "box", At: 1})
+	reg.Observe(AdvertObservation{PubKey: "near", HasGPS: true, Lat: 0.5, Lon: 0.5, NetworkID: "box", At: 1})
 	reg.Observe(AdvertObservation{PubKey: "far", HasGPS: true, Lat: 40, Lon: 40, NetworkID: "box", At: 1})
 
 	f.scanOnce()
@@ -74,7 +78,7 @@ func TestScanOnceClearsResolvedFlag(t *testing.T) {
 		t.Fatalf("expected node flagged, got %v", v.Flags)
 	}
 	// Node moves back inside coverage; the flag should clear on the next scan.
-	reg.Observe(AdvertObservation{PubKey: "n", HasGPS: true, Lat: 0, Lon: 0, NetworkID: "box", At: 2})
+	reg.Observe(AdvertObservation{PubKey: "n", HasGPS: true, Lat: 0.5, Lon: 0.5, NetworkID: "box", At: 2})
 	f.scanOnce()
 	if v, _ := reg.GetView("n"); len(v.Flags) != 0 {
 		t.Errorf("flag not cleared after node returned to coverage: %v", v.Flags)

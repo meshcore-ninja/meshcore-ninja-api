@@ -16,7 +16,21 @@ const (
 	// the coverage area of every network it has been heard on — a likely-bogus
 	// location (bad GPS fix, spoofed coordinates, or a misattributed advert).
 	FlagFarFromNetwork = "far_from_network"
+
+	// FlagNetworkTooFar marks a node whose position is close to at least one of
+	// its networks but implausibly far from another it also belongs to. A node
+	// only joins a network's set when its advert reaches that network's analyzers,
+	// so membership in two coverage areas thousands of km apart is physically
+	// impossible — a pubkey collision or replayed/bridged packet. Its identity and
+	// location can't be trusted, so it is treated like a bad-location node.
+	FlagNetworkTooFar = "network_too_far"
 )
+
+// locationFlagged reports whether a flag set contains any flag that makes the
+// node's position untrustworthy, so it should be kept off the map.
+func locationFlagged(flags []string) bool {
+	return containsStr(flags, FlagFarFromNetwork) || containsStr(flags, FlagNetworkTooFar)
+}
 
 // defaultFarFromNetworkKM is the distance beyond which a node counts as too far
 // from a network's coverage area to be plausible.
@@ -89,10 +103,7 @@ func (f *Flagger) scanOnce() {
 	desired := make(map[string][]string)
 	flagged := 0
 	f.nodes.eachNode(func(n *NodeRecord) {
-		var flags []string
-		if f.isFarFromNetwork(n) {
-			flags = append(flags, FlagFarFromNetwork)
-		}
+		flags := f.locationFlags(n)
 		desired[n.PubKey] = flags
 		if len(flags) > 0 {
 			flagged++
@@ -107,25 +118,41 @@ func (f *Flagger) scanOnce() {
 		flagged, changed, float64(time.Since(start).Microseconds())/1000)
 }
 
-// isFarFromNetwork reports whether the node is beyond the threshold from the
-// coverage area of every network it belongs to. A node is only flagged when at
-// least one of its networks has a known area and it is far from all of them;
-// nodes without GPS, without networks, or whose networks all lack coverage areas
-// are left unflagged (their location can't be judged).
-func (f *Flagger) isFarFromNetwork(n *NodeRecord) bool {
+// locationFlags evaluates the node's position against the coverage areas of the
+// networks it belongs to and returns the flags it earns. Only networks with a
+// known area are considered; nodes without GPS, without networks, or whose
+// networks all lack coverage are left unflagged (their location can't be judged).
+//
+//   - far from every evaluated network  -> FlagFarFromNetwork (bogus location)
+//   - close to one but far from another  -> FlagNetworkTooFar (impossible membership)
+//
+// The two are mutually exclusive; a node far from all networks is only ever
+// FlagFarFromNetwork.
+func (f *Flagger) locationFlags(n *NodeRecord) []string {
 	if !n.HasGPS || !validCoords(n.Lat, n.Lon) || len(n.Networks) == 0 {
-		return false
+		return nil
 	}
-	evaluated := false
+	var evaluated, near, far int
 	for _, netID := range n.Networks {
 		d, ok := f.areas.DistanceKM(netID, n.Lat, n.Lon)
 		if !ok {
 			continue
 		}
-		evaluated = true
+		evaluated++
 		if d <= f.farKM {
-			return false // close enough to at least one of its networks
+			near++
+		} else {
+			far++
 		}
 	}
-	return evaluated // far from all networks that had an area to check against
+	switch {
+	case evaluated == 0:
+		return nil // no network had an area to judge against
+	case near == 0:
+		return []string{FlagFarFromNetwork} // far from all of them
+	case far > 0:
+		return []string{FlagNetworkTooFar} // near one, impossibly far from another
+	default:
+		return nil // within reach of all its networks
+	}
 }

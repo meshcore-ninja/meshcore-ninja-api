@@ -202,9 +202,10 @@ func (s *MapSnapshotter) collectNodes() [][10]any {
 		// Mark seen before any skip so a matching imported directory entry never
 		// slips back in under the same pubkey.
 		seen[n.PubKey] = true
-		// A node flagged with an implausible location is intentionally omitted: its
-		// coordinates would misplace it on the map.
-		if containsStr(n.Flags, FlagFarFromNetwork) {
+		// A node with an untrustworthy location (bogus coordinates, or an impossible
+		// multi-network membership) is intentionally omitted: its coordinates would
+		// misplace it on the map.
+		if locationFlagged(n.Flags) {
 			continue
 		}
 		nets := append([]string(nil), n.Networks...)
