@@ -86,8 +86,16 @@ docker run --rm -p 8080:8080 \
   ghcr.io/meshcore-cz/meshcore-ninja-api:latest
 ```
 
+Or build and run locally with Docker Compose:
+
+```bash
+mkdir -p data
+docker compose up --build
+```
+
 The image downloads network definitions from `data_url`, listens on `:8080`,
-and stores SQLite state at `/app/state/meshcore.db` by default. Mount your own
+and stores SQLite state at `/app/state/meshcore.db` by default. The Compose file
+bind-mounts that state directory to local `./data`. Mount your own
 TOML file over `/app/config.toml` to change these settings. The built-in
 container config comes from `config.docker.example.toml`.
 
