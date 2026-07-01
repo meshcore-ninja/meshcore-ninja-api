@@ -20,7 +20,8 @@ network_update_interval = "10m"
 dedup_window = "30m"
 link_halflife = "12h"
 observer_ttl = "2h"
-db = "/state/meshcore.db"
+db = "/state/core.db"
+links_db = "/state/links.db"
 persist_interval = "45s"
 counter_persist_interval = "30s"
 node_persist_interval = "20s"
@@ -42,7 +43,7 @@ import_interval = "3h"
 	if cfg.Addr != ":9090" || cfg.DataURL != "https://example.test/networks.json" || cfg.AllowOrigin != "https://meshcore.ninja" {
 		t.Fatalf("basic fields not loaded: %+v", cfg)
 	}
-	if cfg.TangleveilURL != "wss://example.test/ws" || cfg.DBPath != "/state/meshcore.db" || cfg.ImportURL != "" {
+	if cfg.TangleveilURL != "wss://example.test/ws" || cfg.DBPath != "/state/core.db" || cfg.LinksDBPath != "/state/links.db" || cfg.ImportURL != "" {
 		t.Fatalf("URL/path fields not loaded: %+v", cfg)
 	}
 	if !reflect.DeepEqual(cfg.NetworkIDs, []string{"net-a", "net-b"}) {

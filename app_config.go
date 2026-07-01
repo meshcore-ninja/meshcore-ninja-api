@@ -46,6 +46,7 @@ type AppConfig struct {
 	LinkHalfLife            Duration `toml:"link_halflife"`
 	ObserverTTL             Duration `toml:"observer_ttl"`
 	DBPath                  string   `toml:"db"`
+	LinksDBPath             string   `toml:"links_db"`
 	PersistInterval         Duration `toml:"persist_interval"`
 	CounterPersistInterval  Duration `toml:"counter_persist_interval"`
 	NodePersistInterval     Duration `toml:"node_persist_interval"`
@@ -66,7 +67,8 @@ func DefaultAppConfig() AppConfig {
 		DedupWindow:             Duration(15 * time.Minute),
 		LinkHalfLife:            Duration(24 * time.Hour),
 		ObserverTTL:             Duration(time.Hour),
-		DBPath:                  "meshcore.db",
+		DBPath:                  "core.db",
+		LinksDBPath:             "links.db",
 		PersistInterval:         Duration(20 * time.Second),
 		CounterPersistInterval:  Duration(20 * time.Second),
 		NodePersistInterval:     Duration(20 * time.Second),
@@ -145,6 +147,7 @@ func bindConfigFlags(fs *flag.FlagSet, cfg AppConfig, configPath string) *AppCon
 	fs.DurationVar((*time.Duration)(&out.LinkHalfLife), "link-halflife", cfg.LinkHalfLife.Std(), "half-life of a link's recent-activity score")
 	fs.DurationVar((*time.Duration)(&out.ObserverTTL), "observer-ttl", cfg.ObserverTTL.Std(), "drop observers/nodes idle longer than this")
 	fs.StringVar(&out.DBPath, "db", cfg.DBPath, "SQLite file for persisting counters across restarts (empty = in-memory only)")
+	fs.StringVar(&out.LinksDBPath, "links-db", cfg.LinksDBPath, "SQLite file for persisting links when --db is enabled")
 	fs.DurationVar((*time.Duration)(&out.PersistInterval), "persist-interval", cfg.PersistInterval.Std(), "default interval for SQLite flushes without a collection-specific override")
 	fs.DurationVar((*time.Duration)(&out.CounterPersistInterval), "counter-persist-interval", cfg.CounterPersistInterval.Std(), "how often to flush counters to --db")
 	fs.DurationVar((*time.Duration)(&out.NodePersistInterval), "node-persist-interval", cfg.NodePersistInterval.Std(), "how often to flush dirty nodes to --db")

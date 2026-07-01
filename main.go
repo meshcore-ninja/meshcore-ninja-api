@@ -70,13 +70,16 @@ func main() {
 	loadAdverts := false // backfill per-node advert history in the background after startup
 	var advertBackfillPubKeys []string
 	if cfg.DBPath != "" {
+		if cfg.LinksDBPath == "" {
+			log.Fatal("configuration error: links_db is required when db is enabled")
+		}
 		bootStart := time.Now()
 		t := time.Now()
-		db, err = OpenDB(cfg.DBPath)
+		db, err = OpenDB(cfg.DBPath, cfg.LinksDBPath)
 		if err != nil {
-			log.Fatalf("opening db %s: %v", cfg.DBPath, err)
+			log.Fatalf("opening db %s / %s: %v", cfg.DBPath, cfg.LinksDBPath, err)
 		}
-		log.Printf("startup: opened db %s in %s", cfg.DBPath, time.Since(t).Round(time.Millisecond))
+		log.Printf("startup: opened db %s and links db %s in %s", cfg.DBPath, cfg.LinksDBPath, time.Since(t).Round(time.Millisecond))
 		defer db.Close()
 
 		t = time.Now()

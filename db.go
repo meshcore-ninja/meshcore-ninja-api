@@ -14,9 +14,11 @@ import (
 // cgo) so cumulative totals and the node/observer gauges survive restarts. One
 // row per scope; the periodic flush upserts every scope inside one transaction.
 type DB struct {
-	db    *sql.DB
-	write sync.Mutex
-	stats atomicStats
+	db        *sql.DB
+	links     *sql.DB
+	write     sync.Mutex
+	linkWrite sync.Mutex
+	stats     atomicStats
 }
 
 type atomicStats struct {
@@ -83,29 +85,6 @@ CREATE TABLE IF NOT EXISTS observers (
 	updated_at   INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE TABLE IF NOT EXISTS links (
-	node_a           TEXT    NOT NULL,
-	node_b           TEXT    NOT NULL,
-	packet_count     INTEGER NOT NULL DEFAULT 0,
-	first_seen       INTEGER NOT NULL DEFAULT 0,
-	last_seen        INTEGER NOT NULL DEFAULT 0,
-	activity_score   REAL    NOT NULL DEFAULT 0,
-	score_updated_at INTEGER NOT NULL DEFAULT 0,
-	PRIMARY KEY (node_a, node_b)
-);
--- The PK covers lookups by node_a; this index covers lookups by node_b, so all
--- links touching a selected public key (either endpoint) are found cheaply.
-CREATE INDEX IF NOT EXISTS idx_links_node_b ON links(node_b);
-
-CREATE TABLE IF NOT EXISTS link_networks (
-	node_a     TEXT    NOT NULL,
-	node_b     TEXT    NOT NULL,
-	network_id TEXT    NOT NULL,
-	first_seen INTEGER NOT NULL DEFAULT 0,
-	last_seen  INTEGER NOT NULL DEFAULT 0,
-	PRIMARY KEY (node_a, node_b, network_id)
-);
-
 CREATE TABLE IF NOT EXISTS imported_nodes (
 	public_key      TEXT PRIMARY KEY,
 	type            INTEGER NOT NULL DEFAULT 0,
@@ -139,7 +118,7 @@ CREATE TABLE IF NOT EXISTS imported_node_history (
 	last_advert       TEXT    NOT NULL DEFAULT '',
 	last_advert_at    INTEGER NOT NULL DEFAULT 0,
 	adv_lat           REAL    NOT NULL DEFAULT 0,
-	adv_lon           REAL    NOT NULL DEFAULT 0,
+	adv_lon           REAL NOT NULL DEFAULT 0,
 	inserted_date     TEXT    NOT NULL DEFAULT '',
 	updated_date      TEXT    NOT NULL DEFAULT '',
 	params            TEXT    NOT NULL DEFAULT '{}',
@@ -153,9 +132,34 @@ CREATE TABLE IF NOT EXISTS imported_node_history (
 );
 CREATE INDEX IF NOT EXISTS idx_imported_history_pubkey ON imported_node_history(public_key, first_captured_at);`
 
-// OpenDB opens (creating if needed) the SQLite counter store. WAL mode and a
-// busy timeout keep the single periodic writer from tripping over readers.
-func OpenDB(path string) (*DB, error) {
+const linkSchema = `
+CREATE TABLE IF NOT EXISTS links (
+	node_a           TEXT    NOT NULL,
+	node_b           TEXT    NOT NULL,
+	packet_count     INTEGER NOT NULL DEFAULT 0,
+	first_seen       INTEGER NOT NULL DEFAULT 0,
+	last_seen        INTEGER NOT NULL DEFAULT 0,
+	activity_score   REAL    NOT NULL DEFAULT 0,
+	score_updated_at INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (node_a, node_b)
+);
+-- The PK covers lookups by node_a; this index covers lookups by node_b, so all
+-- links touching a selected public key (either endpoint) are found cheaply.
+CREATE INDEX IF NOT EXISTS idx_links_node_b ON links(node_b);
+
+CREATE TABLE IF NOT EXISTS link_networks (
+	node_a     TEXT    NOT NULL,
+	node_b     TEXT    NOT NULL,
+	network_id TEXT    NOT NULL,
+	first_seen INTEGER NOT NULL DEFAULT 0,
+	last_seen  INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (node_a, node_b, network_id)
+);`
+
+// OpenDB opens (creating if needed) the core SQLite store plus the separate link
+// graph store. WAL mode and a busy timeout keep periodic writers from tripping
+// over readers.
+func OpenDB(path, linksPath string) (*DB, error) {
 	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
 	sdb, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -177,15 +181,32 @@ func OpenDB(path string) (*DB, error) {
 		_ = sdb.Close()
 		return nil, fmt.Errorf("migrate adverts.analyzer_name: %w", err)
 	}
-	d := &DB{db: sdb}
+	linksDB, err := sql.Open("sqlite", "file:"+linksPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
+	if err != nil {
+		_ = sdb.Close()
+		return nil, err
+	}
+	if _, err := linksDB.Exec(linkSchema); err != nil {
+		_ = sdb.Close()
+		_ = linksDB.Close()
+		return nil, fmt.Errorf("init link schema: %w", err)
+	}
+	d := &DB{db: sdb, links: linksDB}
 	if err := d.initStats(); err != nil {
 		_ = sdb.Close()
+		_ = linksDB.Close()
 		return nil, fmt.Errorf("init stats: %w", err)
 	}
 	return d, nil
 }
 
-func (d *DB) Close() error { return d.db.Close() }
+func (d *DB) Close() error {
+	err := d.db.Close()
+	if linkErr := d.links.Close(); err == nil {
+		err = linkErr
+	}
+	return err
+}
 
 // SQLiteStats is a lightweight snapshot of current durable table sizes.
 type SQLiteStats struct {
@@ -467,10 +488,10 @@ func (d *DB) SaveLinks(records []LinkRecord, now int64) error {
 	if len(records) == 0 {
 		return nil
 	}
-	d.write.Lock()
-	defer d.write.Unlock()
+	d.linkWrite.Lock()
+	defer d.linkWrite.Unlock()
 
-	tx, err := d.db.Begin()
+	tx, err := d.links.Begin()
 	if err != nil {
 		return err
 	}
@@ -517,7 +538,7 @@ func (d *DB) SaveLinks(records []LinkRecord, now int64) error {
 // LoadLinks reads every persisted link aggregate plus its network associations
 // back into memory at startup.
 func (d *DB) LoadLinks() ([]LinkRecord, error) {
-	rows, err := d.db.Query(`SELECT node_a, node_b, packet_count, first_seen, last_seen, activity_score, score_updated_at FROM links`)
+	rows, err := d.links.Query(`SELECT node_a, node_b, packet_count, first_seen, last_seen, activity_score, score_updated_at FROM links`)
 	if err != nil {
 		return nil, err
 	}
@@ -539,7 +560,7 @@ func (d *DB) LoadLinks() ([]LinkRecord, error) {
 		byPair[[2]string{out[i].NodeA, out[i].NodeB}] = &out[i]
 	}
 
-	nrows, err := d.db.Query(`SELECT node_a, node_b, network_id, first_seen, last_seen FROM link_networks`)
+	nrows, err := d.links.Query(`SELECT node_a, node_b, network_id, first_seen, last_seen FROM link_networks`)
 	if err != nil {
 		return nil, err
 	}

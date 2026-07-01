@@ -94,7 +94,7 @@ docker compose up --build
 ```
 
 The image downloads network definitions from `data_url`, listens on `:8080`,
-and stores SQLite state at `/app/state/meshcore.db` by default. The Compose file
+and stores SQLite state at `/app/state/core.db` and `/app/state/links.db` by default. The Compose file
 bind-mounts local `./config.toml` to `/app/config.toml` and stores state in
 local `./data`. The built-in container config comes from
 `config.docker.example.toml` when no override is mounted.
@@ -124,7 +124,8 @@ dedup_window = "15m"
 link_halflife = "24h"
 observer_ttl = "1h"
 
-db = "/app/state/meshcore.db"
+db = "/app/state/core.db"
+links_db = "/app/state/links.db"
 persist_interval = "20s"
 counter_persist_interval = "20s"
 node_persist_interval = "20s"
@@ -149,12 +150,13 @@ Config keys:
 | `dedup_window` | `15m` | how long a content hash counts as already-seen |
 | `link_halflife` | `24h` | half-life of a link's recent-activity score |
 | `observer_ttl` | `1h` | drop observers/nodes idle longer than this |
-| `db` | `meshcore.db` | SQLite file for persisting counters across restarts; empty = in-memory only |
+| `db` | `core.db` | SQLite file for core persistence (counters, nodes, adverts, observers, imports); empty = in-memory only |
+| `links_db` | `links.db` | SQLite file for persisted `links` and `link_networks` when `db` is enabled |
 | `persist_interval` | `20s` | fallback interval for counter/node/advert/link flushes when a collection-specific interval is omitted |
 | `counter_persist_interval` | `20s` | how often to flush counters to `db`; `0s` disables periodic counter flushes except shutdown |
 | `node_persist_interval` | `20s` | how often to flush dirty node overview rows to `db`; `0s` disables periodic node flushes except shutdown |
 | `advert_persist_interval` | `20s` | how often to flush pending advert history rows to `db`; `0s` disables periodic advert flushes except shutdown |
-| `link_persist_interval` | `20s` | how often to flush dirty link rows to `db`; `0s` disables periodic link flushes except shutdown |
+| `link_persist_interval` | `20s` | how often to flush dirty link rows to `links_db`; `0s` disables periodic link flushes except shutdown |
 | `observer_persist_interval` | `12s` | how often to flush observer activity to `db` |
 | `import_url` | `https://map.meshcore.io/api/v1/nodes?binary=0&short=0` | external node directory to mirror; empty disables |
 | `import_interval` | `1h` | how often to sync the external node directory |
@@ -172,7 +174,7 @@ process restart.
 
 ### Persistence
 
-Counters persist to `meshcore.db` by default, using the pure-Go
+Core data persists to `core.db` and the link graph persists to `links.db` by default, using the pure-Go
 [`modernc.org/sqlite`](https://modernc.org/sqlite) driver (no cgo). Every
 `counter_persist_interval` (and once on shutdown) each scope's durable state —
 cumulative totals, payload-type breakdown, and the node/observer sets — is
@@ -180,6 +182,16 @@ upserted as one row per scope, so totals and gauges continue across restarts.
 The short-lived dedup maps and the pkt/m rate window are not persisted; they
 rebuild on their own within their windows. Set `db = ""` to disable persistence
 and keep counters in-memory only.
+
+Existing deployments that still have `links` and `link_networks` inside the core
+database can copy them to `links.db` with
+[`scripts/migrate_links_to_links_db.sql`](scripts/migrate_links_to_links_db.sql):
+
+```bash
+cd /path/to/state
+cp core.db core.db.bak
+sqlite3 core.db ".read /path/to/meshcore-ninja-api/scripts/migrate_links_to_links_db.sql"
+```
 
 ## Endpoints
 

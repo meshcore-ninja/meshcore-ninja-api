@@ -21,7 +21,8 @@ func TestStatsAPIAndMetrics(t *testing.T) {
 		{PublicKey: "dd"},
 	})
 
-	db, err := OpenDB(filepath.Join(t.TempDir(), "stats.db"))
+	dir := t.TempDir()
+	db, err := OpenDB(filepath.Join(dir, "core.db"), filepath.Join(dir, "links.db"))
 	if err != nil {
 		t.Fatalf("OpenDB: %v", err)
 	}

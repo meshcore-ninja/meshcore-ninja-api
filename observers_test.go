@@ -41,7 +41,8 @@ func TestObserverRegistryObserve(t *testing.T) {
 }
 
 func TestSaveLoadObservers(t *testing.T) {
-	db, err := OpenDB(filepath.Join(t.TempDir(), "t.db"))
+	dir := t.TempDir()
+	db, err := OpenDB(filepath.Join(dir, "core.db"), filepath.Join(dir, "links.db"))
 	if err != nil {
 		t.Fatalf("OpenDB: %v", err)
 	}

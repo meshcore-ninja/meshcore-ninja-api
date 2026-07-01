@@ -153,7 +153,8 @@ func TestLinkPersistRestart(t *testing.T) {
 	reg.ObservePath("h1", "net-a", []string{a, b, c}, 100)
 	reg.ObservePath("h2", "net-b", []string{a, b}, 200) // A—B count 2, second network
 
-	db, err := OpenDB(filepath.Join(t.TempDir(), "t.db"))
+	dir := t.TempDir()
+	db, err := OpenDB(filepath.Join(dir, "core.db"), filepath.Join(dir, "links.db"))
 	if err != nil {
 		t.Fatalf("OpenDB: %v", err)
 	}
