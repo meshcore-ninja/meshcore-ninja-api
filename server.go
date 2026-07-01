@@ -434,12 +434,16 @@ type linkNeighborView struct {
 }
 
 type linkView struct {
-	Neighbor       linkNeighborView `json:"neighbor"`
-	PacketCount    uint64           `json:"packetCount"`
-	RecentActivity float64          `json:"recentActivity"`
-	FirstSeen      int64            `json:"firstSeen"`
-	LastSeen       int64            `json:"lastSeen"`
-	Networks       []string         `json:"networks"`
+	Neighbor           linkNeighborView        `json:"neighbor"`
+	PacketCount        uint64                  `json:"packetCount"`
+	RecentActivity     float64                 `json:"recentActivity"`
+	FirstSeen          int64                   `json:"firstSeen"`
+	LastSeen           int64                   `json:"lastSeen"`
+	Networks           []string                `json:"networks"`
+	NetworkDetails     []linkNetworkDetailView `json:"networkDetails,omitempty"`
+	Quality            string                  `json:"quality"`
+	LowConfidence      bool                    `json:"lowConfidence"`
+	LowConfidenceCount uint64                  `json:"lowConfidenceCount,omitempty"`
 	// Direction relative to the selected node: how many counted packets it sent to
 	// vs received from this neighbor. Exposes asymmetric (one-way) links.
 	SentByNode         uint64            `json:"sentByNode"`
@@ -452,6 +456,20 @@ type linkView struct {
 	SNRRecvByNode      []float64         `json:"snrsRecvByNode,omitempty"`
 	Sources            map[string]uint64 `json:"sources,omitempty"`  // counted events by route type (flood/direct/…)
 	Geometry           *linkGeometryView `json:"geometry,omitempty"` // endpoint positions at observation, if known
+}
+
+type linkNetworkDetailView struct {
+	NetworkID          string `json:"networkId"`
+	PacketCount        uint64 `json:"packetCount"`
+	SentByNode         uint64 `json:"sentByNode"`
+	RecvByNode         uint64 `json:"recvByNode"`
+	LastHashSentByNode string `json:"lastHashSentByNode,omitempty"`
+	LastHashRecvByNode string `json:"lastHashRecvByNode,omitempty"`
+	FirstSeen          int64  `json:"firstSeen"`
+	LastSeen           int64  `json:"lastSeen"`
+	Quality            string `json:"quality"`
+	LowConfidence      bool   `json:"lowConfidence"`
+	LowConfidenceCount uint64 `json:"lowConfidenceCount,omitempty"`
 }
 
 // linkGeometryView is the link's drawable geometry from the selected node's
@@ -1193,14 +1211,18 @@ func (s *Server) handleNodeLinks(w http.ResponseWriter, r *http.Request, rawPub 
 	now := nowUnix()
 	all := s.links.LinksForNode(node, now)
 
-	// Apply the network and activity filters. The network filter only includes or
-	// excludes whole links; it does not touch packetCount.
+	// Apply the network and activity filters. When a network filter is active,
+	// counts are narrowed to matching per-network link stats.
 	filtered := all[:0:0]
 	for _, l := range all {
-		if since > 0 && l.LastSeen < since {
-			continue
+		if len(netFilter) > 0 {
+			var ok bool
+			l, ok = l.withNetworkFilter(netFilter)
+			if !ok {
+				continue
+			}
 		}
-		if len(netFilter) > 0 && !anyInSet(l.Networks, netFilter) {
+		if since > 0 && l.LastSeen < since {
 			continue
 		}
 		filtered = append(filtered, l)
@@ -1228,6 +1250,10 @@ func (s *Server) handleNodeLinks(w http.ResponseWriter, r *http.Request, rawPub 
 			FirstSeen:          l.FirstSeen,
 			LastSeen:           l.LastSeen,
 			Networks:           l.Networks,
+			NetworkDetails:     linkNetworkDetailViews(l.NetworkDetails),
+			Quality:            l.Quality,
+			LowConfidence:      l.LowConfidence,
+			LowConfidenceCount: l.LowConfidenceCount,
 			SentByNode:         l.SentByNode,
 			RecvByNode:         l.RecvByNode,
 			LastHashSentByNode: l.LastHashSentByNode,
@@ -1262,6 +1288,29 @@ func (s *Server) handleNodeLinks(w http.ResponseWriter, r *http.Request, rawPub 
 		"total":    total,
 		"capped":   capped,
 	})
+}
+
+func linkNetworkDetailViews(in []LinkNetworkDetail) []linkNetworkDetailView {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]linkNetworkDetailView, 0, len(in))
+	for _, n := range in {
+		out = append(out, linkNetworkDetailView{
+			NetworkID:          n.NetworkID,
+			PacketCount:        n.PacketCount,
+			SentByNode:         n.SentByNode,
+			RecvByNode:         n.RecvByNode,
+			LastHashSentByNode: n.LastHashSentByNode,
+			LastHashRecvByNode: n.LastHashRecvByNode,
+			FirstSeen:          n.FirstSeen,
+			LastSeen:           n.LastSeen,
+			Quality:            n.Quality,
+			LowConfidence:      n.LowConfidence,
+			LowConfidenceCount: n.LowConfidenceCount,
+		})
+	}
+	return out
 }
 
 // neighborView resolves a neighbor's display metadata: live node registry first,

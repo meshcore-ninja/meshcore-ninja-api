@@ -95,6 +95,14 @@ final receiving hop before links are recorded.
   **direct** paths are pre-computed routes the sender declared, so a link seen
   only via `direct` may never have been a real RF hop. This is the primary lens
   for spotting unrealistic connections.
+- **Network evidence** — `networkDetails` breaks packet counts, direction counts,
+  last hashes, first/last seen times, and confidence down per network. Filtering
+  `/api/nodes/{pubkey}/links?networks=...` narrows the returned link stats to
+  those matching per-network counters.
+- **Confidence** — `quality` is `high`, `low`, `mixed`, or `unknown`.
+  `lowConfidence` / `lowConfidenceCount` mark evidence derived from ambiguous
+  paths such as 1-byte path hashes. These links are kept, but callers can display
+  them as weaker evidence instead of treating them like exact 2-byte routes.
 - **Last packet hash** — `lastHashSentByNode` and `lastHashRecvByNode` are the
   content hashes of the most recent packets counted in each direction, so a
   suspicious directional link traces back to a concrete packet.

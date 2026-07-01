@@ -72,6 +72,55 @@ func TestLinkCrossNetworkCountsOnceRecordsBoth(t *testing.T) {
 	if len(l.Networks) != 2 || l.Networks[0] != "net-a" || l.Networks[1] != "net-b" {
 		t.Errorf("networks = %v, want [net-a net-b]", l.Networks)
 	}
+	if len(l.NetworkDetails) != 2 {
+		t.Fatalf("networkDetails = %d, want 2", len(l.NetworkDetails))
+	}
+	for _, d := range l.NetworkDetails {
+		if d.PacketCount != 1 {
+			t.Errorf("%s packetCount = %d, want 1", d.NetworkID, d.PacketCount)
+		}
+	}
+}
+
+func TestLinkLowConfidenceAndNetworkDetails(t *testing.T) {
+	a, b := pk(1), pk(2)
+	reg := noDecay()
+
+	reg.ObservePathCtx(PathObservation{Hash: "h-low", NetworkID: "net-a", Path: []string{a, b}, LowConfidence: true, Now: 100})
+	reg.ObservePathCtx(PathObservation{Hash: "h-high", NetworkID: "net-b", Path: []string{a, b}, Now: 200})
+
+	l := mustNeighbor(t, reg, a, b)
+	if l.PacketCount != 2 || l.LowConfidenceCount != 1 || !l.LowConfidence || l.Quality != "mixed" {
+		t.Fatalf("global count/quality = count:%d low:%d flag:%v quality:%q, want 2/1/true/mixed", l.PacketCount, l.LowConfidenceCount, l.LowConfidence, l.Quality)
+	}
+	if len(l.NetworkDetails) != 2 {
+		t.Fatalf("networkDetails = %d, want 2", len(l.NetworkDetails))
+	}
+	byNet := map[string]LinkNetworkDetail{}
+	for _, d := range l.NetworkDetails {
+		byNet[d.NetworkID] = d
+	}
+	if d := byNet["net-a"]; d.PacketCount != 1 || d.LowConfidenceCount != 1 || !d.LowConfidence || d.Quality != "low" || d.LastHashSentByNode != "h-low" {
+		t.Errorf("net-a detail = %+v, want low confidence h-low", d)
+	}
+	if d := byNet["net-b"]; d.PacketCount != 1 || d.LowConfidenceCount != 0 || d.LowConfidence || d.Quality != "high" || d.LastHashSentByNode != "h-high" {
+		t.Errorf("net-b detail = %+v, want high confidence h-high", d)
+	}
+
+	netA, ok := l.withNetworkFilter(map[string]bool{"net-a": true})
+	if !ok {
+		t.Fatal("net-a filtered link missing")
+	}
+	if netA.PacketCount != 1 || netA.LowConfidenceCount != 1 || netA.Quality != "low" || netA.LastHashSentByNode != "h-low" {
+		t.Errorf("net-a filtered = count:%d low:%d quality:%q hash:%q, want 1/1/low/h-low", netA.PacketCount, netA.LowConfidenceCount, netA.Quality, netA.LastHashSentByNode)
+	}
+	netB, ok := l.withNetworkFilter(map[string]bool{"net-b": true})
+	if !ok {
+		t.Fatal("net-b filtered link missing")
+	}
+	if netB.PacketCount != 1 || netB.LowConfidenceCount != 0 || netB.Quality != "high" || netB.LastHashSentByNode != "h-high" {
+		t.Errorf("net-b filtered = count:%d low:%d quality:%q hash:%q, want 1/0/high/h-high", netB.PacketCount, netB.LowConfidenceCount, netB.Quality, netB.LastHashSentByNode)
+	}
 }
 
 // 4. Different paths for the same packet count each distinct adjacent link once.
@@ -430,14 +479,17 @@ func TestNodeLinksEndpoint(t *testing.T) {
 		}
 	}
 
-	// Network filter includes only links observed through net-b (A—C).
+	// Network filter includes only links observed through net-b (A—C), with
+	// counts narrowed to the matching per-network evidence.
 	resp = getLinks(t, srv, a, "networks=net-b")
 	if resp.Total != 1 || resp.Links[0].Neighbor.PubKey != ids[0xc0] {
 		t.Errorf("networks=net-b: total=%d first=%v, want 1/C", resp.Total, resp.Links)
 	}
-	// Network filter must not change the global packet count.
 	if resp.Links[0].PacketCount != 3 {
-		t.Errorf("filtered A—C packetCount = %d, want 3 (unchanged by filter)", resp.Links[0].PacketCount)
+		t.Errorf("filtered A—C packetCount = %d, want 3", resp.Links[0].PacketCount)
+	}
+	if len(resp.Links[0].NetworkDetails) != 1 || resp.Links[0].NetworkDetails[0].NetworkID != "net-b" {
+		t.Errorf("filtered A—C networkDetails = %+v, want only net-b", resp.Links[0].NetworkDetails)
 	}
 }
 

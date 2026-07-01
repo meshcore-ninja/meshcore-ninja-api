@@ -204,6 +204,7 @@ func OpenDB(path, linksPath string) (*DB, error) {
 		{"has_snr", "INTEGER NOT NULL DEFAULT 0"},
 		{"snrs_ab", "TEXT NOT NULL DEFAULT '[]'"},
 		{"snrs_ba", "TEXT NOT NULL DEFAULT '[]'"},
+		{"low_confidence_count", "INTEGER NOT NULL DEFAULT 0"},
 		{"geo", "TEXT NOT NULL DEFAULT ''"},
 		{"sources", "TEXT NOT NULL DEFAULT '{}'"},
 	} {
@@ -217,6 +218,20 @@ func OpenDB(path, linksPath string) (*DB, error) {
 		_ = sdb.Close()
 		_ = linksDB.Close()
 		return nil, fmt.Errorf("migrate links.last_hash: %w", err)
+	}
+	for _, m := range []struct{ col, decl string }{
+		{"packet_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"dir_ab", "INTEGER NOT NULL DEFAULT 0"},
+		{"dir_ba", "INTEGER NOT NULL DEFAULT 0"},
+		{"last_hash_ab", "TEXT NOT NULL DEFAULT ''"},
+		{"last_hash_ba", "TEXT NOT NULL DEFAULT ''"},
+		{"low_confidence_count", "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if err := ensureColumn(linksDB, "link_networks", m.col, m.decl); err != nil {
+			_ = sdb.Close()
+			_ = linksDB.Close()
+			return nil, fmt.Errorf("migrate link_networks.%s: %w", m.col, err)
+		}
 	}
 	d := &DB{db: sdb, links: linksDB}
 	if err := d.initStats(); err != nil {
@@ -621,8 +636,8 @@ func (d *DB) SaveLinks(records []LinkRecord, now int64) error {
 	defer tx.Rollback()
 
 	linkStmt, err := tx.Prepare(`
-		INSERT INTO links (node_a, node_b, packet_count, first_seen, last_seen, activity_score, score_updated_at, last_hash_ab, last_hash_ba, dir_ab, dir_ba, snrs_ab, snrs_ba, geo, sources)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO links (node_a, node_b, packet_count, first_seen, last_seen, activity_score, score_updated_at, last_hash_ab, last_hash_ba, dir_ab, dir_ba, snrs_ab, snrs_ba, low_confidence_count, geo, sources)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(node_a, node_b) DO UPDATE SET
 			packet_count     = excluded.packet_count,
 			first_seen       = MIN(links.first_seen, excluded.first_seen),
@@ -635,6 +650,7 @@ func (d *DB) SaveLinks(records []LinkRecord, now int64) error {
 			dir_ba           = excluded.dir_ba,
 			snrs_ab          = excluded.snrs_ab,
 			snrs_ba          = excluded.snrs_ba,
+			low_confidence_count = excluded.low_confidence_count,
 			geo              = excluded.geo,
 			sources          = excluded.sources`)
 	if err != nil {
@@ -643,11 +659,17 @@ func (d *DB) SaveLinks(records []LinkRecord, now int64) error {
 	defer linkStmt.Close()
 
 	netStmt, err := tx.Prepare(`
-		INSERT INTO link_networks (node_a, node_b, network_id, first_seen, last_seen)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO link_networks (node_a, node_b, network_id, first_seen, last_seen, packet_count, dir_ab, dir_ba, last_hash_ab, last_hash_ba, low_confidence_count)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(node_a, node_b, network_id) DO UPDATE SET
 			first_seen = MIN(link_networks.first_seen, excluded.first_seen),
-			last_seen  = MAX(link_networks.last_seen, excluded.last_seen)`)
+			last_seen  = MAX(link_networks.last_seen, excluded.last_seen),
+			packet_count = excluded.packet_count,
+			dir_ab = excluded.dir_ab,
+			dir_ba = excluded.dir_ba,
+			last_hash_ab = excluded.last_hash_ab,
+			last_hash_ba = excluded.last_hash_ba,
+			low_confidence_count = excluded.low_confidence_count`)
 	if err != nil {
 		return err
 	}
@@ -655,11 +677,11 @@ func (d *DB) SaveLinks(records []LinkRecord, now int64) error {
 
 	for _, rec := range records {
 		if _, err := linkStmt.Exec(rec.NodeA, rec.NodeB, rec.PacketCount, rec.FirstSeen, rec.LastSeen, rec.Score, rec.ScoreUpdatedAt,
-			rec.LastHashAB, rec.LastHashBA, rec.DirAB, rec.DirBA, marshalLinkSNRs(rec.SNRsAB), marshalLinkSNRs(rec.SNRsBA), marshalLinkGeo(rec), marshalLinkSources(rec.SourceCounts)); err != nil {
+			rec.LastHashAB, rec.LastHashBA, rec.DirAB, rec.DirBA, marshalLinkSNRs(rec.SNRsAB), marshalLinkSNRs(rec.SNRsBA), rec.LowConfidenceCount, marshalLinkGeo(rec), marshalLinkSources(rec.SourceCounts)); err != nil {
 			return err
 		}
 		for _, n := range rec.Networks {
-			if _, err := netStmt.Exec(rec.NodeA, rec.NodeB, n.NetworkID, n.FirstSeen, n.LastSeen); err != nil {
+			if _, err := netStmt.Exec(rec.NodeA, rec.NodeB, n.NetworkID, n.FirstSeen, n.LastSeen, n.PacketCount, n.DirAB, n.DirBA, n.LastHashAB, n.LastHashBA, n.LowConfidenceCount); err != nil {
 				return err
 			}
 		}
@@ -670,7 +692,7 @@ func (d *DB) SaveLinks(records []LinkRecord, now int64) error {
 // LoadLinks reads every persisted link aggregate plus its network associations
 // back into memory at startup.
 func (d *DB) LoadLinks() ([]LinkRecord, error) {
-	rows, err := d.links.Query(`SELECT node_a, node_b, packet_count, first_seen, last_seen, activity_score, score_updated_at, last_hash_ab, last_hash_ba, dir_ab, dir_ba, snrs_ab, snrs_ba, geo, sources FROM links`)
+	rows, err := d.links.Query(`SELECT node_a, node_b, packet_count, first_seen, last_seen, activity_score, score_updated_at, last_hash_ab, last_hash_ba, dir_ab, dir_ba, snrs_ab, snrs_ba, low_confidence_count, geo, sources FROM links`)
 	if err != nil {
 		return nil, err
 	}
@@ -687,7 +709,7 @@ func (d *DB) LoadLinks() ([]LinkRecord, error) {
 			snrsBA  string
 		)
 		if err := rows.Scan(&rec.NodeA, &rec.NodeB, &rec.PacketCount, &rec.FirstSeen, &rec.LastSeen, &rec.Score, &rec.ScoreUpdatedAt,
-			&rec.LastHashAB, &rec.LastHashBA, &rec.DirAB, &rec.DirBA, &snrsAB, &snrsBA, &geo, &sources); err != nil {
+			&rec.LastHashAB, &rec.LastHashBA, &rec.DirAB, &rec.DirBA, &snrsAB, &snrsBA, &rec.LowConfidenceCount, &geo, &sources); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(snrsAB), &rec.SNRsAB)
@@ -705,7 +727,7 @@ func (d *DB) LoadLinks() ([]LinkRecord, error) {
 		byPair[[2]string{out[i].NodeA, out[i].NodeB}] = &out[i]
 	}
 
-	nrows, err := d.links.Query(`SELECT node_a, node_b, network_id, first_seen, last_seen FROM link_networks`)
+	nrows, err := d.links.Query(`SELECT node_a, node_b, network_id, first_seen, last_seen, packet_count, dir_ab, dir_ba, last_hash_ab, last_hash_ba, low_confidence_count FROM link_networks`)
 	if err != nil {
 		return nil, err
 	}
@@ -715,7 +737,7 @@ func (d *DB) LoadLinks() ([]LinkRecord, error) {
 			a, b, net string
 			ln        linkNetwork
 		)
-		if err := nrows.Scan(&a, &b, &net, &ln.FirstSeen, &ln.LastSeen); err != nil {
+		if err := nrows.Scan(&a, &b, &net, &ln.FirstSeen, &ln.LastSeen, &ln.PacketCount, &ln.DirAB, &ln.DirBA, &ln.LastHashAB, &ln.LastHashBA, &ln.LowConfidenceCount); err != nil {
 			return nil, err
 		}
 		ln.NetworkID = net

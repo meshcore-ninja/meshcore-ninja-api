@@ -214,7 +214,7 @@ func TestLinkPersistenceRoundTrip(t *testing.T) {
 	posOf := func(k string) (float64, float64, bool) { p, ok := pos[k]; return p[0], p[1], ok }
 
 	src := noDecay()
-	src.ObservePathCtx(PathObservation{Hash: "h1", NetworkID: "net", RouteType: "flood", Path: []string{a, b}, SNRs: []float64{99, 9.5}, Now: 100, PosOf: posOf})
+	src.ObservePathCtx(PathObservation{Hash: "h1", NetworkID: "net", RouteType: "flood", Path: []string{a, b}, SNRs: []float64{99, 9.5}, LowConfidence: true, Now: 100, PosOf: posOf})
 	pos[b] = [2]float64{60, 20}
 	src.ObservePathCtx(PathObservation{Hash: "h2", NetworkID: "net", RouteType: "direct", Path: []string{b, a}, SNRs: []float64{99, -4.5}, Now: 200, PosOf: posOf})
 
@@ -233,6 +233,12 @@ func TestLinkPersistenceRoundTrip(t *testing.T) {
 	l := mustNeighbor(t, dst, a, b)
 	if l.PacketCount != 2 {
 		t.Errorf("packetCount = %d, want 2", l.PacketCount)
+	}
+	if l.LowConfidenceCount != 1 || !l.LowConfidence || l.Quality != "mixed" {
+		t.Errorf("quality low=%d flag=%v quality=%q, want 1/true/mixed", l.LowConfidenceCount, l.LowConfidence, l.Quality)
+	}
+	if len(l.NetworkDetails) != 1 || l.NetworkDetails[0].LowConfidenceCount != 1 || l.NetworkDetails[0].Quality != "mixed" {
+		t.Errorf("networkDetails = %+v, want persisted mixed low-confidence count", l.NetworkDetails)
 	}
 	if l.SentByNode != 1 || l.RecvByNode != 1 {
 		t.Errorf("direction sent=%d recv=%d, want 1/1", l.SentByNode, l.RecvByNode)

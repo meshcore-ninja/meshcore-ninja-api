@@ -76,9 +76,15 @@ func (k linkKey) nodeB() string { return hex.EncodeToString(k[32:]) }
 // first/last times it was seen there. The set of these is what lets a link report
 // every network it has carried traffic on, independent of the global packet count.
 type linkNetwork struct {
-	NetworkID string
-	FirstSeen int64
-	LastSeen  int64
+	NetworkID          string
+	FirstSeen          int64
+	LastSeen           int64
+	PacketCount        uint64
+	DirAB              uint64
+	DirBA              uint64
+	LastHashAB         string
+	LastHashBA         string
+	LowConfidenceCount uint64
 }
 
 // linkPosEpsilonKM is how far either endpoint must move before the link's
@@ -128,6 +134,9 @@ type LinkRecord struct {
 	// observation order.
 	SNRsAB []float64
 	SNRsBA []float64
+	// LowConfidenceCount counts globally-deduplicated observations whose resolved
+	// path was ambiguous (currently 1-byte path hashes).
+	LowConfidenceCount uint64
 	// SourceCounts breaks the counted events down by route type
 	// ("flood", "direct", "transport_flood", "transport_direct", "unknown"), for
 	// diagnosing which packet kinds a link's adjacency actually came from —
@@ -157,10 +166,17 @@ type linkDedupKey struct {
 	key  linkKey
 }
 
+type linkNetworkDedupKey struct {
+	hash      string
+	key       linkKey
+	networkID string
+}
+
 type linkShard struct {
-	mu    sync.Mutex
-	links map[linkKey]*LinkRecord
-	dedup map[linkDedupKey]int64 // -> last-seen unix; short-lived, swept by window
+	mu       sync.Mutex
+	links    map[linkKey]*LinkRecord
+	dedup    map[linkDedupKey]int64        // -> last-seen unix; short-lived, swept by window
+	netDedup map[linkNetworkDedupKey]int64 // per-network packet-link dedup
 }
 
 // LinkRegistry is the global, concurrency-safe store of observed links. It is
@@ -183,6 +199,7 @@ func newLinkRegistry(halfLifeSeconds float64) *LinkRegistry {
 	for i := range r.shards {
 		r.shards[i].links = make(map[linkKey]*LinkRecord)
 		r.shards[i].dedup = make(map[linkDedupKey]int64)
+		r.shards[i].netDedup = make(map[linkNetworkDedupKey]int64)
 	}
 	return r
 }
@@ -211,6 +228,9 @@ type PathObservation struct {
 	NetworkID string
 	RouteType string // "flood","direct","transport_flood","transport_direct"; "" = unknown
 	Path      []string
+	// LowConfidence marks observations whose resolved path is inherently
+	// ambiguous, e.g. from 1-byte path hashes.
+	LowConfidence bool
 	// SNRs, when non-nil, are SNR values (dB) decoded from a TRACE packet's
 	// accumulator. SNRs[0] is the receive SNR for the hop into Path[0] (the first
 	// resolved node), so the link Path[i-1]->Path[i] uses SNRs[i].
@@ -278,6 +298,7 @@ func (r *LinkRegistry) ObservePathCtx(o PathObservation) {
 						networkID: o.NetworkID,
 						routeType: o.RouteType,
 						now:       o.Now,
+						lowConf:   o.LowConfidence,
 					}
 					obs.setPositions(o.PosOf, prevHex, raw)
 					// SNRs[0] belongs to the hop into the first path node, which
@@ -312,6 +333,7 @@ type linkObs struct {
 	latB, lonB float64
 	snr        float64
 	hasSNR     bool
+	lowConf    bool
 }
 
 // setPositions resolves both endpoints' positions (in canonical A/B order) via
@@ -360,6 +382,14 @@ func (r *LinkRegistry) observeLink(o linkObs) {
 	if o.networkID != "" {
 		rec.addNetwork(o.networkID, o.now)
 		rec.dirty = true
+		ndk := linkNetworkDedupKey{hash: o.hash, key: o.key, networkID: o.networkID}
+		if _, dup := sh.netDedup[ndk]; dup {
+			sh.netDedup[ndk] = o.now
+		} else {
+			sh.netDedup[ndk] = o.now
+			rec.countNetwork(o)
+			rec.dirty = true
+		}
 	}
 
 	dk := linkDedupKey{hash: o.hash, key: o.key}
@@ -379,6 +409,9 @@ func (r *LinkRegistry) observeLink(o linkObs) {
 	rec.LastSeen = o.now
 	rec.decayScore(o.now, r.halfLife)
 	rec.Score++
+	if o.lowConf {
+		rec.LowConfidenceCount++
+	}
 	if o.fromIsA {
 		rec.DirAB++
 		rec.LastHashAB = o.hash
@@ -443,6 +476,26 @@ func (rec *LinkRecord) addNetwork(networkID string, now int64) {
 	rec.Networks = append(rec.Networks, linkNetwork{NetworkID: networkID, FirstSeen: now, LastSeen: now})
 }
 
+func (rec *LinkRecord) countNetwork(o linkObs) {
+	for i := range rec.Networks {
+		if rec.Networks[i].NetworkID != o.networkID {
+			continue
+		}
+		rec.Networks[i].PacketCount++
+		if o.fromIsA {
+			rec.Networks[i].DirAB++
+			rec.Networks[i].LastHashAB = o.hash
+		} else {
+			rec.Networks[i].DirBA++
+			rec.Networks[i].LastHashBA = o.hash
+		}
+		if o.lowConf {
+			rec.Networks[i].LowConfidenceCount++
+		}
+		return
+	}
+}
+
 // decayScore decays the stored score to `now` using the configured half-life,
 // then advances ScoreUpdatedAt. Caller adds the new event's weight afterwards.
 func (rec *LinkRecord) decayScore(now int64, halfLife float64) {
@@ -478,6 +531,11 @@ func (r *LinkRegistry) sweep(now, dedupWindow int64) {
 				delete(sh.dedup, k)
 			}
 		}
+		for k, ts := range sh.netDedup {
+			if now-ts > dedupWindow {
+				delete(sh.netDedup, k)
+			}
+		}
 		sh.mu.Unlock()
 	}
 }
@@ -488,12 +546,16 @@ func (r *LinkRegistry) sweep(now, dedupWindow int64) {
 // stats plus the *other* endpoint's public key. Neighbor metadata (name, type,
 // gps) is resolved by the HTTP handler via the node registry.
 type LinkNeighbor struct {
-	Neighbor       string   // hex pubkey of the other endpoint
-	PacketCount    uint64   // global, deduplicated
-	RecentActivity float64  // decayed score at query time
-	FirstSeen      int64    // global first observation of the link
-	LastSeen       int64    // global last counted observation
-	Networks       []string // networks the link was observed through, first-seen order
+	Neighbor           string   // hex pubkey of the other endpoint
+	PacketCount        uint64   // global, deduplicated
+	RecentActivity     float64  // decayed score at query time
+	FirstSeen          int64    // global first observation of the link
+	LastSeen           int64    // global last counted observation
+	Networks           []string // networks the link was observed through, first-seen order
+	NetworkDetails     []LinkNetworkDetail
+	Quality            string
+	LowConfidence      bool
+	LowConfidenceCount uint64
 
 	// Direction relative to the selected node: SentByNode counts events where the
 	// node was the sender (node→neighbor), RecvByNode where it received
@@ -520,6 +582,20 @@ type LinkNeighbor struct {
 	SegmentCount int  // number of frozen historical segments
 }
 
+type LinkNetworkDetail struct {
+	NetworkID          string
+	PacketCount        uint64
+	SentByNode         uint64
+	RecvByNode         uint64
+	FirstSeen          int64
+	LastSeen           int64
+	Quality            string
+	LowConfidence      bool
+	LowConfidenceCount uint64
+	LastHashSentByNode string
+	LastHashRecvByNode string
+}
+
 // LinksForNode returns every observed link with the given node as an endpoint,
 // each described from that node's side (the neighbor is the opposite endpoint).
 // The activity score is decayed to `now`. Storage is scanned sparsely — only
@@ -544,20 +620,42 @@ func (r *LinkRegistry) LinksForNode(node pubKey, now int64) []LinkNeighbor {
 				continue
 			}
 			nets := make([]string, len(rec.Networks))
+			netDetails := make([]LinkNetworkDetail, 0, len(rec.Networks))
 			for j, n := range rec.Networks {
 				nets[j] = n.NetworkID
+				d := LinkNetworkDetail{
+					NetworkID:          n.NetworkID,
+					PacketCount:        n.PacketCount,
+					FirstSeen:          n.FirstSeen,
+					LastSeen:           n.LastSeen,
+					Quality:            linkQuality(n.PacketCount, n.LowConfidenceCount),
+					LowConfidence:      n.LowConfidenceCount > 0,
+					LowConfidenceCount: n.LowConfidenceCount,
+				}
+				if nodeIsA {
+					d.SentByNode, d.RecvByNode = n.DirAB, n.DirBA
+					d.LastHashSentByNode, d.LastHashRecvByNode = n.LastHashAB, n.LastHashBA
+				} else {
+					d.SentByNode, d.RecvByNode = n.DirBA, n.DirAB
+					d.LastHashSentByNode, d.LastHashRecvByNode = n.LastHashBA, n.LastHashAB
+				}
+				netDetails = append(netDetails, d)
 			}
 			ln := LinkNeighbor{
-				Neighbor:       hex.EncodeToString(neighbor[:]),
-				PacketCount:    rec.PacketCount,
-				RecentActivity: decayedScore(rec.Score, rec.ScoreUpdatedAt, now, r.halfLife),
-				FirstSeen:      rec.FirstSeen,
-				LastSeen:       rec.LastSeen,
-				Networks:       nets,
-				Sources:        copyCounts(rec.SourceCounts),
-				HasPos:         rec.HasPos,
-				Moved:          len(rec.Segments) > 0,
-				SegmentCount:   len(rec.Segments),
+				Neighbor:           hex.EncodeToString(neighbor[:]),
+				PacketCount:        rec.PacketCount,
+				RecentActivity:     decayedScore(rec.Score, rec.ScoreUpdatedAt, now, r.halfLife),
+				FirstSeen:          rec.FirstSeen,
+				LastSeen:           rec.LastSeen,
+				Networks:           nets,
+				NetworkDetails:     netDetails,
+				Quality:            linkQuality(rec.PacketCount, rec.LowConfidenceCount),
+				LowConfidence:      rec.LowConfidenceCount > 0,
+				LowConfidenceCount: rec.LowConfidenceCount,
+				Sources:            copyCounts(rec.SourceCounts),
+				HasPos:             rec.HasPos,
+				Moved:              len(rec.Segments) > 0,
+				SegmentCount:       len(rec.Segments),
 			}
 			if nodeIsA {
 				ln.SentByNode, ln.RecvByNode = rec.DirAB, rec.DirBA
@@ -585,6 +683,52 @@ func (r *LinkRegistry) LinksForNode(node pubKey, now int64) []LinkNeighbor {
 		sh.mu.Unlock()
 	}
 	return out
+}
+
+func (ln LinkNeighbor) withNetworkFilter(filter map[string]bool) (LinkNeighbor, bool) {
+	if len(filter) == 0 {
+		return ln, true
+	}
+	var details []LinkNetworkDetail
+	var packetCount, sent, recv, low uint64
+	var first, last int64
+	var networks []string
+	var lastSent, lastRecv string
+	for _, d := range ln.NetworkDetails {
+		if !filter[d.NetworkID] {
+			continue
+		}
+		details = append(details, d)
+		networks = append(networks, d.NetworkID)
+		packetCount += d.PacketCount
+		sent += d.SentByNode
+		recv += d.RecvByNode
+		low += d.LowConfidenceCount
+		if first == 0 || (d.FirstSeen > 0 && d.FirstSeen < first) {
+			first = d.FirstSeen
+		}
+		if d.LastSeen > last {
+			last = d.LastSeen
+			lastSent = d.LastHashSentByNode
+			lastRecv = d.LastHashRecvByNode
+		}
+	}
+	if len(details) == 0 {
+		return LinkNeighbor{}, false
+	}
+	ln.NetworkDetails = details
+	ln.Networks = networks
+	ln.PacketCount = packetCount
+	ln.SentByNode = sent
+	ln.RecvByNode = recv
+	ln.LowConfidenceCount = low
+	ln.LowConfidence = low > 0
+	ln.Quality = linkQuality(packetCount, low)
+	ln.FirstSeen = first
+	ln.LastSeen = last
+	ln.LastHashSentByNode = lastSent
+	ln.LastHashRecvByNode = lastRecv
+	return ln, true
 }
 
 // --- persistence plumbing ---
@@ -663,6 +807,7 @@ func mergeRestoredLink(existing, restored *LinkRecord, halfLife float64) {
 	existing.PacketCount += restored.PacketCount
 	existing.DirAB += restored.DirAB
 	existing.DirBA += restored.DirBA
+	existing.LowConfidenceCount += restored.LowConfidenceCount
 	if existing.FirstSeen == 0 || (restored.FirstSeen > 0 && restored.FirstSeen < existing.FirstSeen) {
 		existing.FirstSeen = restored.FirstSeen
 	}
@@ -738,6 +883,19 @@ func mergeSNRHistory(existing, restored []float64, restoredNewer bool) []float64
 	return append([]float64(nil), vals[len(vals)-linkSNRHistoryLimit:]...)
 }
 
+func linkQuality(packetCount, lowConfidence uint64) string {
+	switch {
+	case packetCount == 0:
+		return "unknown"
+	case lowConfidence == 0:
+		return "high"
+	case lowConfidence >= packetCount:
+		return "low"
+	default:
+		return "mixed"
+	}
+}
+
 // copyCounts returns a shallow copy of a source-count map (nil stays nil), so
 // persisted/served copies don't alias the live registry map.
 func copyCounts(m map[string]uint64) map[string]uint64 {
@@ -761,11 +919,24 @@ func combinedScore(a float64, aAt int64, b float64, bAt int64, halfLife float64)
 func (rec *LinkRecord) mergeNetwork(n linkNetwork) {
 	for i := range rec.Networks {
 		if rec.Networks[i].NetworkID == n.NetworkID {
+			existingLast := rec.Networks[i].LastSeen
 			if rec.Networks[i].FirstSeen == 0 || (n.FirstSeen > 0 && n.FirstSeen < rec.Networks[i].FirstSeen) {
 				rec.Networks[i].FirstSeen = n.FirstSeen
 			}
 			if n.LastSeen > rec.Networks[i].LastSeen {
 				rec.Networks[i].LastSeen = n.LastSeen
+			}
+			rec.Networks[i].PacketCount += n.PacketCount
+			rec.Networks[i].DirAB += n.DirAB
+			rec.Networks[i].DirBA += n.DirBA
+			rec.Networks[i].LowConfidenceCount += n.LowConfidenceCount
+			if n.LastSeen >= existingLast {
+				if n.LastHashAB != "" {
+					rec.Networks[i].LastHashAB = n.LastHashAB
+				}
+				if n.LastHashBA != "" {
+					rec.Networks[i].LastHashBA = n.LastHashBA
+				}
 			}
 			return
 		}

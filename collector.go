@@ -103,8 +103,11 @@ func (c *Collector) handle(data []byte) {
 		}
 		if raw := decodeRawHex(p.RawHex); len(raw) > 0 {
 			obs.RouteType = routeTypeName(raw[0])
-			if p.PayloadType != nil && meshpkt.PayloadType(byte(*p.PayloadType)) == meshpkt.PayloadTrace {
-				obs.SNRs = traceSNRs(raw)
+			if pkt, err := meshpkt.DecodePacket(raw); err == nil {
+				obs.LowConfidence = pkt.PathHashSize == 1 && pkt.HopCount() > 0
+				if pkt.Type == meshpkt.PayloadTrace {
+					obs.SNRs = meshpkt.TraceSNRs(pkt.Path)
+				}
 			}
 		}
 		if c.nodes != nil {
@@ -161,16 +164,6 @@ func routeTypeName(header byte) string {
 	default:
 		return ""
 	}
-}
-
-// traceSNRs decodes a TRACE packet's per-hop SNR accumulator (carried in the
-// wire path field) to dB values. Returns nil if the packet won't decode.
-func traceSNRs(raw []byte) []float64 {
-	pkt, err := meshpkt.DecodePacket(raw)
-	if err != nil || pkt.Type != meshpkt.PayloadTrace {
-		return nil
-	}
-	return meshpkt.TraceSNRs(pkt.Path)
 }
 
 // collectAdvert decodes an ADVERT's raw wire bytes and records the node. Bad or
