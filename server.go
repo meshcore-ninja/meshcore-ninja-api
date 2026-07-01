@@ -22,6 +22,7 @@ type Server struct {
 	db          *DB // optional; enables the per-node advert history endpoint
 	metrics     *Metrics
 	hub         *Hub
+	snapshotter *MapSnapshotter
 	allowOrigin string
 
 	statsMu       sync.Mutex
@@ -29,8 +30,8 @@ type Server struct {
 	statsCachedAt time.Time
 }
 
-func NewServer(store *Store, nodes *NodeRegistry, observers *ObserverRegistry, links *LinkRegistry, imported *ImportRegistry, db *DB, metrics *Metrics, hub *Hub, allowOrigin string) *Server {
-	return &Server{store: store, nodes: nodes, observers: observers, links: links, imported: imported, db: db, metrics: metrics, hub: hub, allowOrigin: allowOrigin}
+func NewServer(store *Store, nodes *NodeRegistry, observers *ObserverRegistry, links *LinkRegistry, imported *ImportRegistry, db *DB, metrics *Metrics, hub *Hub, snapshotter *MapSnapshotter, allowOrigin string) *Server {
+	return &Server{store: store, nodes: nodes, observers: observers, links: links, imported: imported, db: db, metrics: metrics, hub: hub, snapshotter: snapshotter, allowOrigin: allowOrigin}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -45,7 +46,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/nodes/", s.instrument("/api/nodes/:pubkey", s.handleNodeSub))
 	mux.HandleFunc("/api/search/options", s.instrument("/api/search/options", s.handleSearchOptions))
 	mux.HandleFunc("/api/search", s.instrument("/api/search", s.handleSearch))
-	mux.HandleFunc("/api/map", s.instrument("/api/map", s.handleMap))
 	mux.HandleFunc("/api/route", s.instrument("/api/route", s.handleRoute))
 	mux.HandleFunc("/api/observers", s.instrument("/api/observers", s.handleObservers))
 	// Prometheus/VictoriaMetrics scrape endpoint. Left un-instrumented to avoid
@@ -54,18 +54,34 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("/metrics", s.handleMetrics)
 	}
 	wrapped := s.withCORS(gzipMiddleware(mux))
-	if s.hub == nil {
-		return wrapped
-	}
-	// The live advert feed upgrades to a WebSocket, which hijacks the underlying
-	// connection — so it must bypass the gzip middleware. A dedicated outer mux
-	// routes the upgrade directly to the hub; everything else falls through to the
-	// gzipped+CORS REST handler. (The more specific "/api/live" pattern wins over
-	// "/" in Go's ServeMux.)
+
+	// Snapshot and WebSocket routes live outside the gzip middleware. Snapshots
+	// are already zstd-compressed on disk and must not be re-encoded; WebSocket
+	// upgrades are incompatible with the gzip response writer.
 	root := http.NewServeMux()
 	root.Handle("/", wrapped)
-	root.HandleFunc("/api/live", s.hub.ServeWS)
+	if s.snapshotter != nil {
+		root.HandleFunc("/api/snapshots/latest.json", s.withCORSSingle(s.snapshotter.ServeManifest))
+		root.HandleFunc("/api/snapshots/", s.withCORSSingle(s.snapshotter.ServeSnapshot))
+	}
+	if s.hub != nil {
+		root.HandleFunc("/api/live", s.hub.ServeWS)
+	}
 	return root
+}
+
+// withCORSSingle wraps a single handler with CORS headers (no gzip).
+func (s *Server) withCORSSingle(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", s.allowOrigin)
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Vary", "Origin")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		h(w, r)
+	}
 }
 
 // gzipMiddleware compresses responses for clients that accept gzip. The map
@@ -969,7 +985,7 @@ func parseSearchParams(s *Server, r *http.Request) (MapParams, int, string) {
 //
 //	GET /api/search?q=&types=&networks=&active=&since=&limit=
 //
-// Unlike /api/map it includes nodes without GPS, so every observed node is
+// Unlike the snapshot endpoint it includes nodes without GPS, so every observed node is
 // findable. Results are ranked by relevance (exact/prefix name, then pubkey
 // prefix, then substring) and recency, and carry no per-node advert list to keep
 // the payload small.
@@ -1286,47 +1302,6 @@ func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
 		"nodes": nodes,
 		"hops":  hops,
 	})
-}
-
-// handleMap serves a viewport query against the node registry as a GeoJSON
-// FeatureCollection: aggregated clusters at low zoom, individual nodes when
-// searching or zoomed in. Responses are cheap and change slowly, so they carry a
-// short shared cache lifetime.
-//
-// Query params:
-//   - bbox=west,south,east,north  viewport in degrees (ignored when q is set)
-//   - zoom=<int>                  map zoom level (controls cluster granularity)
-//   - types=1,2,3,4               node types to include (chat/repeater/room/sensor)
-//   - networks=id,id              network IDs to include
-//   - since=<unix> | active=24h|7d|30d   keep nodes seen within the window
-//   - q=<text>                    name substring or pubkey hex prefix (global)
-//   - limit=<int>                 cap on individual node features
-func (s *Server) handleMap(w http.ResponseWriter, r *http.Request) {
-	qv := r.URL.Query()
-	p := MapParams{
-		Zoom:     atoiDefault(qv.Get("zoom"), 0),
-		Types:    parseByteSet(qv.Get("types")),
-		Networks: parseStringSet(qv.Get("networks")),
-		Q:        strings.TrimSpace(qv.Get("q")),
-		Limit:    atoiDefault(qv.Get("limit"), 0),
-		All:      qv.Get("all") == "1" || qv.Get("all") == "true",
-	}
-	if bbox, ok := parseBBox(qv.Get("bbox")); ok {
-		p.BBox, p.HasBBox = bbox, true
-	}
-	if since := qv.Get("since"); since != "" {
-		p.Since = int64(atoiDefault(since, 0))
-	} else if d, ok := parseActive(qv.Get("active")); ok {
-		p.Since = nowUnix() - int64(d.Seconds())
-	}
-
-	var imported []*ImportedNode
-	if s.imported != nil {
-		imported = s.imported.Records()
-	}
-
-	w.Header().Set("Cache-Control", "public, max-age=30")
-	writeJSON(w, http.StatusOK, s.nodes.MapQuery(p, imported))
 }
 
 // handleObservers serves the global observer activity table, most recently

@@ -127,6 +127,11 @@ func main() {
 		log.Printf("startup: db restore complete in %s", time.Since(bootStart).Round(time.Millisecond))
 	}
 
+	// startupDone is closed after all synchronous state restoration so the
+	// snapshotter captures the warm registry in its first snapshot.
+	startupDone := make(chan struct{})
+	close(startupDone)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -296,9 +301,12 @@ func main() {
 		})
 	}
 
+	snapshotter := NewMapSnapshotter(registry, imported, cfg.SnapshotDir, cfg.SnapshotBaseURL)
+	go snapshotter.Run(ctx, startupDone, cfg.SnapshotInterval.Std())
+
 	srv := &http.Server{
 		Addr:         cfg.Addr,
-		Handler:      NewServer(store, registry, observers, links, imported, db, metrics, hub, cfg.AllowOrigin).Handler(),
+		Handler:      NewServer(store, registry, observers, links, imported, db, metrics, hub, snapshotter, cfg.AllowOrigin).Handler(),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 15 * time.Second,
 	}

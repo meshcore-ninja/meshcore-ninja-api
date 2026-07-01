@@ -55,6 +55,9 @@ type AppConfig struct {
 	ObserverPersistInterval Duration `toml:"observer_persist_interval"`
 	ImportURL               string   `toml:"import_url"`
 	ImportInterval          Duration `toml:"import_interval"`
+	SnapshotDir             string   `toml:"snapshot_dir"`
+	SnapshotBaseURL         string   `toml:"snapshot_base_url"`
+	SnapshotInterval        Duration `toml:"snapshot_interval"`
 }
 
 func DefaultAppConfig() AppConfig {
@@ -77,6 +80,9 @@ func DefaultAppConfig() AppConfig {
 		ObserverPersistInterval: Duration(12 * time.Second),
 		ImportURL:               defaultImportURL,
 		ImportInterval:          Duration(time.Hour),
+		SnapshotDir:             "snapshots",
+		SnapshotBaseURL:         "",
+		SnapshotInterval:        Duration(5 * time.Minute),
 	}
 }
 
@@ -156,6 +162,9 @@ func bindConfigFlags(fs *flag.FlagSet, cfg AppConfig, configPath string) *AppCon
 	fs.DurationVar((*time.Duration)(&out.ObserverPersistInterval), "observer-persist-interval", cfg.ObserverPersistInterval.Std(), "how often to flush observer activity to --db")
 	fs.StringVar(&out.ImportURL, "import-url", cfg.ImportURL, "external node directory to mirror (empty = disabled)")
 	fs.DurationVar((*time.Duration)(&out.ImportInterval), "import-interval", cfg.ImportInterval.Std(), "how often to sync the external node directory")
+	fs.StringVar(&out.SnapshotDir, "snapshot-dir", cfg.SnapshotDir, "directory for versioned full-map snapshot files")
+	fs.StringVar(&out.SnapshotBaseURL, "snapshot-base-url", cfg.SnapshotBaseURL, "public origin prepended to snapshot URLs in latest.json")
+	fs.DurationVar((*time.Duration)(&out.SnapshotInterval), "snapshot-interval", cfg.SnapshotInterval.Std(), "how often to regenerate the full-map snapshot")
 	return out
 }
 
