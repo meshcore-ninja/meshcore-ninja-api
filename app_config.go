@@ -37,9 +37,11 @@ func (d Duration) Std() time.Duration {
 // overridden by flags.
 type AppConfig struct {
 	Addr                    string   `toml:"addr"`
-	DataDir                 string   `toml:"data"`
+	DataURL                 string   `toml:"data_url"`
 	AllowOrigin             string   `toml:"allow_origin"`
 	TangleveilURL           string   `toml:"tangleveil"`
+	NetworkIDs              []string `toml:"networks"`
+	NetworkUpdateInterval   Duration `toml:"network_update_interval"`
 	DedupWindow             Duration `toml:"dedup_window"`
 	LinkHalfLife            Duration `toml:"link_halflife"`
 	ObserverTTL             Duration `toml:"observer_ttl"`
@@ -53,8 +55,10 @@ type AppConfig struct {
 func DefaultAppConfig() AppConfig {
 	return AppConfig{
 		Addr:                    ":8080",
-		DataDir:                 "../data",
+		DataURL:                 "https://meshcore.ninja/networks.json",
 		AllowOrigin:             "*",
+		TangleveilURL:           "wss://tangleveil.meshcore.ninja/ws",
+		NetworkUpdateInterval:   Duration(5 * time.Minute),
 		DedupWindow:             Duration(15 * time.Minute),
 		LinkHalfLife:            Duration(24 * time.Hour),
 		ObserverTTL:             Duration(time.Hour),
@@ -102,12 +106,13 @@ func configPathFromArgs(args []string) (path string, explicit bool) {
 }
 
 func bindConfigFlags(fs *flag.FlagSet, cfg AppConfig, configPath string) *AppConfig {
-	out := &AppConfig{}
+	out := &AppConfig{NetworkIDs: append([]string(nil), cfg.NetworkIDs...)}
 	fs.String("config", configPath, "path to TOML configuration file")
 	fs.StringVar(&out.Addr, "addr", cfg.Addr, "HTTP listen address")
-	fs.StringVar(&out.DataDir, "data", cfg.DataDir, "path to the MeshCore Ninja catalog data/ directory")
+	fs.StringVar(&out.DataURL, "data-url", cfg.DataURL, "URL of the published MeshCore Ninja networks.json")
 	fs.StringVar(&out.AllowOrigin, "allow-origin", cfg.AllowOrigin, "Access-Control-Allow-Origin value")
-	fs.StringVar(&out.TangleveilURL, "tangleveil", cfg.TangleveilURL, "Tangleveil WebSocket URL (wss://...); when set, all CoreScope streams are consumed through Tangleveil instead of connecting to analyzers directly")
+	fs.StringVar(&out.TangleveilURL, "tangleveil", cfg.TangleveilURL, "required Tangleveil WebSocket URL (wss://...); direct analyzer connections are not supported")
+	fs.DurationVar((*time.Duration)(&out.NetworkUpdateInterval), "network-update-interval", cfg.NetworkUpdateInterval.Std(), "how often to refresh networks from --data-url")
 	fs.DurationVar((*time.Duration)(&out.DedupWindow), "dedup-window", cfg.DedupWindow.Std(), "how long a content hash counts as already-seen")
 	fs.DurationVar((*time.Duration)(&out.LinkHalfLife), "link-halflife", cfg.LinkHalfLife.Std(), "half-life of a link's recent-activity score")
 	fs.DurationVar((*time.Duration)(&out.ObserverTTL), "observer-ttl", cfg.ObserverTTL.Std(), "drop observers/nodes idle longer than this")
@@ -116,5 +121,22 @@ func bindConfigFlags(fs *flag.FlagSet, cfg AppConfig, configPath string) *AppCon
 	fs.DurationVar((*time.Duration)(&out.ObserverPersistInterval), "observer-persist-interval", cfg.ObserverPersistInterval.Std(), "how often to flush observer activity to --db")
 	fs.StringVar(&out.ImportURL, "import-url", cfg.ImportURL, "external node directory to mirror (empty = disabled)")
 	fs.DurationVar((*time.Duration)(&out.ImportInterval), "import-interval", cfg.ImportInterval.Std(), "how often to sync the external node directory")
+	return out
+}
+
+func networkIDSet(ids []string) map[string]bool {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			out[id] = true
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
 	return out
 }

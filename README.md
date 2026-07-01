@@ -1,9 +1,12 @@
 # MeshCore Ninja API
 
-A small Go service that connects to every [CoreScope](https://github.com/Kpa-clawbot/CoreScope)
-analyzer declared in a MeshCore Ninja catalog `data/networks/*/network.yaml`
-tree, counts live mesh activity, and serves rollups over a read-only REST API
-the frontend polls.
+A small Go service that consumes [CoreScope](https://github.com/Kpa-clawbot/CoreScope)
+analyzer streams through [Tangleveil](https://tangleveil.meshcore.ninja/), counts live mesh activity for analyzers
+declared in the published MeshCore Ninja network catalog, and serves rollups
+over a read-only REST API the frontend polls.
+
+Tangleveil is the only live ingest path. The API does not connect directly to
+individual CoreScope analyzer WebSockets.
 
 ## What it measures
 
@@ -26,8 +29,8 @@ analyzers):
   `PATH`, …), named via [`meshpkt`](https://github.com/meshcore-cz/meshpkt).
 - **Connection status** — per analyzer, plus connected/total counts per network.
 
-It reads the live stream from each analyzer's WebSocket (`{"type":"packet",…}`
-frames) and uses the analyzer-provided content `hash` as the dedup key.
+It reads multiplexed CoreScope frames from Tangleveil and uses the
+analyzer-provided content `hash` as the dedup key.
 
 ### Nodes & adverts
 
@@ -69,33 +72,30 @@ real time.
 ## Run
 
 ```bash
+cp config.example.toml config.toml
 go run . --config config.toml
 ```
 
-When this repository sits next to the web catalog repository, the tracked
-`config.toml` already points at `../meshcore-ninja/data`:
-
-```bash
-make run
-```
+`make run` uses the same ignored local `config.toml`.
 
 Or run the published container image:
 
 ```bash
 docker run --rm -p 8080:8080 \
-  -v "$PWD/../meshcore-ninja/data:/app/data:ro" \
   -v meshcore-ninja-api:/app/state \
   ghcr.io/meshcore-cz/meshcore-ninja-api:latest
 ```
 
-The image reads catalog data from `/app/data`, listens on `:8080`, and stores
-SQLite state at `/app/state/meshcore.db` by default. Mount a catalog data
-directory or mount your own TOML file over `/app/config.toml`.
+The image downloads network definitions from `data_url`, listens on `:8080`,
+and stores SQLite state at `/app/state/meshcore.db` by default. Mount your own
+TOML file over `/app/config.toml` to change these settings. The built-in
+container config comes from `config.docker.example.toml`.
 
 ## Configuration
 
-Runtime configuration lives in a TOML file. The binary reads `config.toml` by
-default, or a custom path with `--config`:
+Runtime configuration lives in a TOML file. Copy `config.example.toml` to the
+ignored local `config.toml`, then edit it for the deployment. The binary reads
+`config.toml` by default, or a custom path with `--config`:
 
 ```bash
 meshcore-ninja-api --config /etc/meshcore-ninja-api.toml
@@ -106,9 +106,11 @@ overrides after the TOML file is loaded.
 
 ```toml
 addr = ":8080"
-data = "/app/data"
+data_url = "https://meshcore.ninja/networks.json"
 allow_origin = "*"
-tangleveil = ""
+tangleveil = "wss://tangleveil.meshcore.ninja/ws"
+networks = [] # monitor all catalog networks; or ["meshcore-cz", "meshcore-sk"]
+network_update_interval = "5m"
 
 dedup_window = "15m"
 link_halflife = "24h"
@@ -127,9 +129,11 @@ Config keys:
 | key | default | meaning |
 |-----|---------|---------|
 | `addr` | `:8080` | HTTP listen address |
-| `data` | `../data` | path to the MeshCore Ninja catalog `data/` directory |
+| `data_url` | `https://meshcore.ninja/networks.json` | URL of the published MeshCore Ninja network catalog |
 | `allow_origin` | `*` | `Access-Control-Allow-Origin` value |
-| `tangleveil` | empty | Tangleveil WebSocket URL; when set, all CoreScope streams are consumed through Tangleveil |
+| `tangleveil` | `wss://tangleveil.meshcore.ninja/ws` | required Tangleveil WebSocket URL; direct analyzer connections are not supported |
+| `networks` | `[]` | optional network ID allowlist for Tangleveil monitoring; empty monitors every catalog network |
+| `network_update_interval` | `5m` | how often to refresh `data_url`; set to `0s` to disable refresh after startup |
 | `dedup_window` | `15m` | how long a content hash counts as already-seen |
 | `link_halflife` | `24h` | half-life of a link's recent-activity score |
 | `observer_ttl` | `1h` | drop observers/nodes idle longer than this |
@@ -139,9 +143,16 @@ Config keys:
 | `import_url` | `https://map.meshcore.io/api/v1/nodes?binary=0&short=0` | external node directory to mirror; empty disables |
 | `import_interval` | `1h` | how often to sync the external node directory |
 
-Dedup/observer/node maps are swept every minute to stay bounded. Analyzer
-connections reconnect with exponential backoff (1s→30s); non-CoreScope or
-unreachable URLs are retried harmlessly.
+Every ID in `networks` must exist in the downloaded network catalog. Unknown IDs
+fail startup, and failed refreshes keep the previous catalog snapshot, so
+allowlist typos do not silently disable ingest.
+
+Dedup/observer/node maps are swept every minute to stay bounded. The Tangleveil
+connection reconnects with exponential backoff (1s→30s); unavailable sources are
+retried harmlessly by reconnecting to Tangleveil and refreshing `/sources`.
+Network definitions are refreshed from `data_url` on `network_update_interval`;
+successful refreshes update API metadata and rebuild Tangleveil routes without a
+process restart.
 
 ### Persistence
 

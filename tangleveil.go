@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -36,13 +37,15 @@ type tvSource struct {
 // multiplexes all CoreScope streams and routes each message to the correct
 // per-network Collector by the source id field.
 type TangleveilCollector struct {
-	wsURL   string        // WebSocket URL to connect to
-	baseURL string        // HTTP base URL for /sources polling
-	store   *Store        // needed to refresh routes on reconnect
+	wsURL   string // WebSocket URL to connect to
+	baseURL string // HTTP base URL for /sources polling
+	store   *Store // needed to refresh routes on reconnect
+	only    map[string]bool
 	nodes   *NodeRegistry
 	obs     *ObserverRegistry
 	links   *LinkRegistry
 	metrics *Metrics
+	mu      sync.RWMutex
 	routes  map[string]*Collector // Tangleveil source id → handler (rebuilt per connect)
 }
 
@@ -50,7 +53,7 @@ type TangleveilCollector struct {
 // routing table. mapping "networkID:N" points at the Nth AnalyzerState in the
 // named network — the same objects the REST API already exposes, so connection
 // state is visible without any extra virtual states.
-func NewTangleveilCollector(wsURL string, store *Store, nodes *NodeRegistry, observers *ObserverRegistry, links *LinkRegistry, metrics *Metrics) (*TangleveilCollector, error) {
+func NewTangleveilCollector(wsURL string, store *Store, only map[string]bool, nodes *NodeRegistry, observers *ObserverRegistry, links *LinkRegistry, metrics *Metrics) (*TangleveilCollector, error) {
 	base, err := wsToHTTP(wsURL)
 	if err != nil {
 		return nil, fmt.Errorf("bad tangleveil URL %q: %w", wsURL, err)
@@ -59,6 +62,7 @@ func NewTangleveilCollector(wsURL string, store *Store, nodes *NodeRegistry, obs
 		wsURL:   wsURL,
 		baseURL: base,
 		store:   store,
+		only:    only,
 		nodes:   nodes,
 		obs:     observers,
 		links:   links,
@@ -70,6 +74,23 @@ func NewTangleveilCollector(wsURL string, store *Store, nodes *NodeRegistry, obs
 	}
 	tc.routes = routes
 	return tc, nil
+}
+
+func (t *TangleveilCollector) RouteCount() int {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return len(t.routes)
+}
+
+func (t *TangleveilCollector) RefreshRoutes() error {
+	routes, err := t.fetchRoutes()
+	if err != nil {
+		return err
+	}
+	t.mu.Lock()
+	t.routes = routes
+	t.mu.Unlock()
+	return nil
 }
 
 // fetchRoutes calls /sources and maps each source id to a Collector backed by
@@ -91,6 +112,9 @@ func (t *TangleveilCollector) fetchRoutes() (map[string]*Collector, error) {
 
 	routes := make(map[string]*Collector, len(sources))
 	for _, src := range sources {
+		if netID, ok := mappingNetworkID(src.Mapping); ok && len(t.only) > 0 && !t.only[netID] {
+			continue
+		}
 		ns, az, err := t.resolveMapping(src.Mapping)
 		if err != nil {
 			log.Printf("[tangleveil] skipping source %q: %v", src.ID, err)
@@ -106,9 +130,20 @@ func (t *TangleveilCollector) fetchRoutes() (map[string]*Collector, error) {
 		}
 	}
 	if len(routes) == 0 {
-		return nil, fmt.Errorf("tangleveil: /sources returned no mappings that match our networks")
+		if len(t.only) > 0 {
+			return nil, fmt.Errorf("tangleveil: /sources returned no mappings that match configured networks")
+		}
+		return nil, fmt.Errorf("tangleveil: /sources returned no mappings that match catalog networks")
 	}
 	return routes, nil
+}
+
+func mappingNetworkID(mapping string) (string, bool) {
+	parts := strings.SplitN(mapping, ":", 2)
+	if len(parts) != 2 {
+		return "", false
+	}
+	return parts[0], true
 }
 
 // resolveMapping parses "networkID:analyzerIndex" and returns the matching
@@ -156,10 +191,8 @@ func (t *TangleveilCollector) Run(ctx context.Context) {
 			}
 		}
 		// Refresh the routing table on reconnect — sources may have changed.
-		if routes, err := t.fetchRoutes(); err != nil {
+		if err := t.RefreshRoutes(); err != nil {
 			log.Printf("[tangleveil] /sources refresh failed: %v (using previous routes)", err)
-		} else {
-			t.routes = routes
 		}
 	}
 }
@@ -181,12 +214,13 @@ func (t *TangleveilCollector) connectAndRead(ctx context.Context) error {
 	defer conn.Close()
 
 	now := nowUnix()
-	for _, col := range t.routes {
+	routes := t.routesSnapshot()
+	for _, col := range routes {
 		col.az.setConnected(now)
 		t.metrics.setAnalyzerConnected(col.net.ID, col.az.Name, true)
 		t.metrics.incAnalyzerReconnect(col.net.ID, col.az.Name)
 	}
-	log.Printf("[tangleveil] connected %s (%d source(s))", t.wsURL, len(t.routes))
+	log.Printf("[tangleveil] connected %s (%d source(s))", t.wsURL, len(routes))
 	defer t.markAllDisconnected("")
 
 	go func() {
@@ -212,7 +246,9 @@ func (t *TangleveilCollector) handle(data []byte) {
 	if len(env.Payload) == 0 {
 		return
 	}
+	t.mu.RLock()
 	col, ok := t.routes[env.Source]
+	t.mu.RUnlock()
 	if !ok {
 		return // source not in our network set
 	}
@@ -220,10 +256,20 @@ func (t *TangleveilCollector) handle(data []byte) {
 }
 
 func (t *TangleveilCollector) markAllDisconnected(errMsg string) {
-	for _, col := range t.routes {
+	for _, col := range t.routesSnapshot() {
 		col.az.setDisconnected(errMsg)
 		t.metrics.setAnalyzerConnected(col.net.ID, col.az.Name, false)
 	}
+}
+
+func (t *TangleveilCollector) routesSnapshot() []*Collector {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	out := make([]*Collector, 0, len(t.routes))
+	for _, col := range t.routes {
+		out = append(out, col)
+	}
+	return out
 }
 
 // wsToHTTP converts wss:// → https:// and ws:// → http://, stripping any path

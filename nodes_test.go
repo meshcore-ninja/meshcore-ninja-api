@@ -56,10 +56,7 @@ func TestCollectAdvert(t *testing.T) {
 	reg := newNodeRegistry(defaultAdvertsPerNode)
 	ns := &NetworkState{ID: "test-net", Counter: newCounter()}
 	az := &AnalyzerState{Name: "az1", URL: "https://example.test", Counter: newCounter()}
-	c, err := NewCollector(ns, az, reg, nil, nil, nil)
-	if err != nil {
-		t.Fatalf("NewCollector: %v", err)
-	}
+	c := &Collector{net: ns, az: az, nodes: reg}
 
 	advType := int(meshpkt.PayloadAdvert)
 	feedPacket(c, wsPacket{

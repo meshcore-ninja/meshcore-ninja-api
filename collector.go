@@ -1,17 +1,10 @@
 package main
 
 import (
-	"context"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
-	"log"
-	"net/http"
-	"net/url"
 	"strings"
-	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/meshcore-cz/meshpkt"
 )
 
@@ -35,131 +28,20 @@ type wsPacket struct {
 	ResolvedPath []string `json:"resolved_path"`
 }
 
-// browserUA is sent on the handshake; some analyzers sit behind a WAF that is
-// unhappy with the default Go client UA.
+// browserUA is sent on the Tangleveil handshake; some edges sit behind a WAF
+// that is unhappy with the default Go client UA.
 const browserUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
 	"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
 
-// Collector drives a single analyzer connection: it dials, reads the packet
-// stream, feeds events into the store, and reconnects with backoff forever
-// until the context is cancelled.
+// Collector handles packets for one analyzer stream after Tangleveil has
+// multiplexed and routed the source.
 type Collector struct {
-	net        *NetworkState
-	az         *AnalyzerState
-	nodes      *NodeRegistry     // global node/advert registry (nil disables advert collection)
-	observers  *ObserverRegistry // global observer activity registry (nil disables it)
-	links      *LinkRegistry     // global observed-link registry (nil disables it)
-	metrics    *Metrics          // Prometheus telemetry (nil disables it)
-	origin     string
-	candidates []string // ws(s) URLs to try, in preference order
-}
-
-// NewCollector builds the candidate WebSocket URLs for an analyzer. We prefer
-// wss:// over ws:// (most analyzers are TLS, and plain :80 typically 301s to
-// https — which looks like a "bad handshake"), and try the reverse-proxy root
-// before CoreScope's registered /ws path. This makes us robust even when the
-// data file declares http:// for a host that actually serves over https.
-func NewCollector(net *NetworkState, az *AnalyzerState, nodes *NodeRegistry, observers *ObserverRegistry, links *LinkRegistry, metrics *Metrics) (*Collector, error) {
-	u, err := url.Parse(az.URL)
-	if err != nil {
-		return nil, err
-	}
-	if u.Host == "" {
-		return nil, fmt.Errorf("missing host in %q", az.URL)
-	}
-	var candidates []string
-	for _, scheme := range []string{"wss", "ws"} {
-		for _, path := range []string{"/", "/ws"} {
-			candidates = append(candidates, scheme+"://"+u.Host+path)
-		}
-	}
-	return &Collector{
-		net:        net,
-		az:         az,
-		nodes:      nodes,
-		observers:  observers,
-		links:      links,
-		metrics:    metrics,
-		origin:     "https://" + u.Host,
-		candidates: candidates,
-	}, nil
-}
-
-func (c *Collector) Run(ctx context.Context) {
-	backoff := time.Second
-	const maxBackoff = 30 * time.Second
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		if err := c.connectAndRead(ctx); err != nil && ctx.Err() == nil {
-			c.az.setDisconnected(err.Error())
-			log.Printf("[%s/%s] %v (retry in %s)", c.net.ID, c.az.Name, err, backoff)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(backoff):
-		}
-		if backoff < maxBackoff {
-			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
-		}
-	}
-}
-
-func (c *Collector) connectAndRead(ctx context.Context) error {
-	conn, dialed, err := c.dial(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	c.az.setConnected(nowUnix())
-	c.metrics.setAnalyzerConnected(c.net.ID, c.az.Name, true)
-	c.metrics.incAnalyzerReconnect(c.net.ID, c.az.Name)
-	log.Printf("[%s/%s] connected %s", c.net.ID, c.az.Name, dialed)
-	defer func() {
-		c.az.setDisconnected("")
-		c.metrics.setAnalyzerConnected(c.net.ID, c.az.Name, false)
-	}()
-
-	// Close the connection when the context is cancelled so ReadMessage unblocks.
-	go func() {
-		<-ctx.Done()
-		_ = conn.Close()
-	}()
-
-	for {
-		_, data, err := conn.ReadMessage()
-		if err != nil {
-			return err
-		}
-		c.handle(data)
-	}
-}
-
-// dial tries each candidate ws(s) URL until the handshake succeeds, returning
-// the URL that worked.
-func (c *Collector) dial(ctx context.Context) (*websocket.Conn, string, error) {
-	dialer := websocket.Dialer{HandshakeTimeout: 15 * time.Second}
-	header := http.Header{
-		"Origin":     {c.origin},
-		"User-Agent": {browserUA},
-	}
-	var lastErr error
-	for _, target := range c.candidates {
-		dctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-		conn, _, err := dialer.DialContext(dctx, target, header)
-		cancel()
-		if err == nil {
-			return conn, target, nil
-		}
-		lastErr = err
-	}
-	return nil, "", lastErr
+	net       *NetworkState
+	az        *AnalyzerState
+	nodes     *NodeRegistry     // global node/advert registry (nil disables advert collection)
+	observers *ObserverRegistry // global observer activity registry (nil disables it)
+	links     *LinkRegistry     // global observed-link registry (nil disables it)
+	metrics   *Metrics          // Prometheus telemetry (nil disables it)
 }
 
 func (c *Collector) handle(data []byte) {

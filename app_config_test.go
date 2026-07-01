@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -11,9 +12,11 @@ func TestLoadAppConfigTomlOverridesDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	raw := []byte(`
 addr = ":9090"
-data = "/catalog/data"
+data_url = "https://example.test/networks.json"
 allow_origin = "https://meshcore.ninja"
 tangleveil = "wss://example.test/ws"
+networks = ["net-a", "net-b"]
+network_update_interval = "10m"
 dedup_window = "30m"
 link_halflife = "12h"
 observer_ttl = "2h"
@@ -32,13 +35,17 @@ import_interval = "3h"
 		t.Fatal(err)
 	}
 
-	if cfg.Addr != ":9090" || cfg.DataDir != "/catalog/data" || cfg.AllowOrigin != "https://meshcore.ninja" {
+	if cfg.Addr != ":9090" || cfg.DataURL != "https://example.test/networks.json" || cfg.AllowOrigin != "https://meshcore.ninja" {
 		t.Fatalf("basic fields not loaded: %+v", cfg)
 	}
 	if cfg.TangleveilURL != "wss://example.test/ws" || cfg.DBPath != "/state/meshcore.db" || cfg.ImportURL != "" {
 		t.Fatalf("URL/path fields not loaded: %+v", cfg)
 	}
+	if !reflect.DeepEqual(cfg.NetworkIDs, []string{"net-a", "net-b"}) {
+		t.Fatalf("networks = %+v, want [net-a net-b]", cfg.NetworkIDs)
+	}
 	if cfg.DedupWindow.Std() != 30*time.Minute ||
+		cfg.NetworkUpdateInterval.Std() != 10*time.Minute ||
 		cfg.LinkHalfLife.Std() != 12*time.Hour ||
 		cfg.ObserverTTL.Std() != 2*time.Hour ||
 		cfg.PersistInterval.Std() != 45*time.Second ||
@@ -53,7 +60,18 @@ func TestLoadAppConfigMissingOptionalUsesDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg != DefaultAppConfig() {
+	if !reflect.DeepEqual(cfg, DefaultAppConfig()) {
 		t.Fatalf("cfg = %+v, want defaults %+v", cfg, DefaultAppConfig())
+	}
+}
+
+func TestNetworkIDSetNormalizesConfigList(t *testing.T) {
+	got := networkIDSet([]string{" net-a ", "", "net-b", "net-a"})
+	want := map[string]bool{"net-a": true, "net-b": true}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("networkIDSet = %+v, want %+v", got, want)
+	}
+	if got := networkIDSet([]string{"", " "}); got != nil {
+		t.Fatalf("networkIDSet(empty) = %+v, want nil", got)
 	}
 }

@@ -1,0 +1,20 @@
+addr = ":8089"
+data_url = "https://meshcore.ninja/networks.json"
+allow_origin = "*"
+tangleveil = "wss://tangleveil.meshcore.ninja/ws"
+
+# Empty means monitor every catalog network exposed by Tangleveil. To limit live
+# ingest, list network IDs from the published network records.
+networks = []
+network_update_interval = "5m"
+
+dedup_window = "15m"
+link_halflife = "24h"
+observer_ttl = "1h"
+
+db = "meshcore.db"
+persist_interval = "20s"
+observer_persist_interval = "12s"
+
+import_url = "https://map.meshcore.io/api/v1/nodes?binary=0&short=0"
+import_interval = "1h"

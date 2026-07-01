@@ -1,7 +1,7 @@
-// Command meshcore-ninja-api connects to every CoreScope analyzer declared in
-// the data/networks/*/network.yaml files, counts unique packets (deduplicated
-// by content hash), observations and observers, and serves the rollups over a
-// small read-only REST API for the MeshCore Ninja frontend to poll.
+// Command meshcore-ninja-api consumes CoreScope analyzer streams exclusively
+// through Tangleveil, counts unique packets (deduplicated by content hash),
+// observations and observers, and serves the rollups over a small read-only
+// REST API for the MeshCore Ninja frontend to poll.
 package main
 
 import (
@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -23,8 +24,11 @@ func main() {
 	}
 	cfg := bindConfigFlags(flag.CommandLine, fileConfig, configPath)
 	flag.Parse()
+	if cfg.TangleveilURL == "" {
+		log.Fatal("configuration error: tangleveil is required; direct analyzer connections are not supported")
+	}
 
-	configs, err := LoadNetworks(cfg.DataDir)
+	configs, err := LoadNetworks(cfg.DataURL)
 	if err != nil {
 		log.Fatalf("loading networks: %v", err)
 	}
@@ -32,9 +36,16 @@ func main() {
 	for _, c := range configs {
 		analyzerCount += len(c.Analyzers)
 	}
-	log.Printf("loaded %d networks with %d analyzers from %s", len(configs), analyzerCount, cfg.DataDir)
+	log.Printf("loaded %d networks with %d analyzers from %s", len(configs), analyzerCount, cfg.DataURL)
 
 	store := NewStore(configs)
+	networkFilter := networkIDSet(cfg.NetworkIDs)
+	if err := store.ValidateNetworkFilter(networkFilter); err != nil {
+		log.Fatalf("configuration error: %v", err)
+	}
+	if len(networkFilter) > 0 {
+		log.Printf("tangleveil: monitoring limited to %d network(s): %s", len(networkFilter), strings.Join(cfg.NetworkIDs, ", "))
+	}
 	registry := newNodeRegistry(defaultAdvertsPerNode)
 	observers := newObserverRegistry()
 	links := newLinkRegistry(cfg.LinkHalfLife.Std().Seconds())
@@ -49,11 +60,7 @@ func main() {
 	// Pre-create the analyzer gauges so every configured analyzer reports
 	// "disconnected" (0) immediately, rather than appearing only after its first
 	// connection attempt.
-	for _, ns := range store.Networks {
-		for _, az := range ns.Analyzers {
-			metrics.initAnalyzer(ns.ID, az.Name)
-		}
-	}
+	store.InitMetrics(metrics)
 
 	// Optional durable counter store. When --db is set we restore the last
 	// persisted snapshot before any collector runs, so totals and the
@@ -138,26 +145,17 @@ func main() {
 		}()
 	}
 
-	// One collector goroutine per analyzer, or a single Tangleveil collector
-	// that multiplexes all streams when --tangleveil is set.
-	if cfg.TangleveilURL != "" {
-		tv, err := NewTangleveilCollector(cfg.TangleveilURL, store, registry, observers, links, metrics)
-		if err != nil {
-			log.Fatalf("tangleveil: %v", err)
-		}
-		go tv.Run(ctx)
-		log.Printf("tangleveil: routing %d network source(s) through %s", len(tv.routes), cfg.TangleveilURL)
-	} else {
-		for _, ns := range store.Networks {
-			for _, az := range ns.Analyzers {
-				col, err := NewCollector(ns, az, registry, observers, links, metrics)
-				if err != nil {
-					log.Printf("[%s/%s] bad analyzer URL %q: %v", ns.ID, az.Name, az.URL, err)
-					continue
-				}
-				go col.Run(ctx)
-			}
-		}
+	// Tangleveil is the only live-ingest path. It multiplexes every configured
+	// CoreScope stream and routes each source to the matching network/analyzer.
+	tv, err := NewTangleveilCollector(cfg.TangleveilURL, store, networkFilter, registry, observers, links, metrics)
+	if err != nil {
+		log.Fatalf("tangleveil: %v", err)
+	}
+	go tv.Run(ctx)
+	log.Printf("tangleveil: routing %d network source(s) through %s", tv.RouteCount(), cfg.TangleveilURL)
+
+	if cfg.NetworkUpdateInterval.Std() > 0 {
+		go refreshNetworks(ctx, cfg.DataURL, cfg.NetworkUpdateInterval.Std(), store, networkFilter, metrics, tv)
 	}
 
 	// Mirror the external node directory (map.meshcore.io) on its own schedule
@@ -283,4 +281,32 @@ func main() {
 		log.Fatalf("http server: %v", err)
 	}
 	log.Print("shutdown complete")
+}
+
+func refreshNetworks(ctx context.Context, dataURL string, interval time.Duration, store *Store, networkFilter map[string]bool, metrics *Metrics, tv *TangleveilCollector) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			configs, err := LoadNetworks(dataURL)
+			if err != nil {
+				log.Printf("warning: refreshing networks from %s: %v", dataURL, err)
+				continue
+			}
+			next := NewStore(configs)
+			if err := next.ValidateNetworkFilter(networkFilter); err != nil {
+				log.Printf("warning: refreshing networks from %s: %v", dataURL, err)
+				continue
+			}
+			store.Update(configs)
+			store.InitMetrics(metrics)
+			if err := tv.RefreshRoutes(); err != nil {
+				log.Printf("warning: refreshing tangleveil routes after network update: %v", err)
+			}
+			log.Printf("refreshed %d networks with %d analyzers from %s", store.NetworkCount(), store.AnalyzerCount(), dataURL)
+		}
+	}
 }

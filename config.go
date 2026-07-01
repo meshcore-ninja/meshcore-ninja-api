@@ -1,13 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io"
+	"net/http"
 	"sort"
 	"strings"
-
-	"gopkg.in/yaml.v3"
+	"time"
 )
 
 // AnalyzerConfig is one CoreScope analyzer instance belonging to a network.
@@ -16,8 +16,8 @@ type AnalyzerConfig struct {
 	URL  string
 }
 
-// NetworkConfig is the subset of a data/networks/<id>/network.yaml we care
-// about: its identity and the analyzers it runs.
+// NetworkConfig is the subset of a published network record we care about: its
+// identity, analyzer list, and coarse metadata used by API filters.
 type NetworkConfig struct {
 	ID        string
 	Name      string
@@ -26,59 +26,62 @@ type NetworkConfig struct {
 	Regions   []string
 }
 
-// networkFile mirrors the relevant fields of network.yaml for decoding.
-type networkFile struct {
-	Name     string `yaml:"name"`
+type networkJSON struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
 	Coverage struct {
-		Countries []string `yaml:"countries"`
-	} `yaml:"coverage"`
+		Countries []string `json:"countries"`
+	} `json:"coverage"`
 	Radio struct {
-		Frequency any    `yaml:"frequency"`
-		Region    string `yaml:"region"`
-	} `yaml:"radio"`
+		Frequency any    `json:"frequency"`
+		Region    string `json:"region"`
+	} `json:"radio"`
 	Radios []struct {
-		Frequency any    `yaml:"frequency"`
-		Region    string `yaml:"region"`
-	} `yaml:"radios"`
+		Frequency any    `json:"frequency"`
+		Region    string `json:"region"`
+	} `json:"radios"`
 	Analyzers []struct {
-		Name string `yaml:"name"`
-		URL  string `yaml:"url"`
-	} `yaml:"analyzers"`
+		Name string `json:"name"`
+		URL  string `json:"url"`
+	} `json:"analyzers"`
 }
 
-// LoadNetworks walks <dataDir>/networks/*/network.yaml and returns every
-// network that declares at least one analyzer. The id is the directory name,
-// matching how the frontend identifies networks.
-func LoadNetworks(dataDir string) ([]NetworkConfig, error) {
-	root := filepath.Join(dataDir, "networks")
-	entries, err := os.ReadDir(root)
+func LoadNetworks(url string) ([]NetworkConfig, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", root, err)
+		return nil, fmt.Errorf("building networks request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	client := http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetching networks from %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("fetching networks from %s: HTTP %d", url, resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading networks from %s: %w", url, err)
+	}
+	return parseNetworksJSON(body)
+}
+
+func parseNetworksJSON(raw []byte) ([]NetworkConfig, error) {
+	var records []networkJSON
+	if err := json.Unmarshal(raw, &records); err != nil {
+		return nil, fmt.Errorf("parsing networks JSON: %w", err)
 	}
 
-	var out []NetworkConfig
-	for _, e := range entries {
-		if !e.IsDir() {
+	out := make([]NetworkConfig, 0, len(records))
+	for _, rec := range records {
+		if rec.ID == "" || len(rec.Analyzers) == 0 {
 			continue
 		}
-		path := filepath.Join(root, e.Name(), "network.yaml")
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return nil, fmt.Errorf("reading %s: %w", path, err)
-		}
-		var nf networkFile
-		if err := yaml.Unmarshal(raw, &nf); err != nil {
-			return nil, fmt.Errorf("parsing %s: %w", path, err)
-		}
-		if len(nf.Analyzers) == 0 {
-			continue
-		}
-		nc := NetworkConfig{ID: e.Name(), Name: nf.Name}
+		nc := NetworkConfig{ID: rec.ID, Name: rec.Name}
 		seenCountries := map[string]bool{}
-		for _, cc := range nf.Coverage.Countries {
+		for _, cc := range rec.Coverage.Countries {
 			cc = strings.ToUpper(strings.TrimSpace(cc))
 			if len(cc) == 2 && !seenCountries[cc] {
 				seenCountries[cc] = true
@@ -104,11 +107,11 @@ func LoadNetworks(dataDir string) ([]NetworkConfig, error) {
 				nc.Regions = append(nc.Regions, r)
 			}
 		}
-		addRegion(nf.Radio.Frequency, nf.Radio.Region)
-		for _, r := range nf.Radios {
+		addRegion(rec.Radio.Frequency, rec.Radio.Region)
+		for _, r := range rec.Radios {
 			addRegion(r.Frequency, r.Region)
 		}
-		for _, a := range nf.Analyzers {
+		for _, a := range rec.Analyzers {
 			if a.URL == "" {
 				continue
 			}

@@ -1,16 +1,15 @@
-# Local development configuration. This assumes this repository lives next to
-# the MeshCore Ninja web catalog repository.
-
-addr = ":8089"
-data = "../meshcore-ninja/data"
+addr = ":8080"
+data_url = "https://meshcore.ninja/networks.json"
 allow_origin = "*"
 tangleveil = "wss://tangleveil.meshcore.ninja/ws"
+networks = []
+network_update_interval = "5m"
 
 dedup_window = "15m"
 link_halflife = "24h"
 observer_ttl = "1h"
 
-db = "meshcore.db"
+db = "/app/state/meshcore.db"
 persist_interval = "20s"
 observer_persist_interval = "12s"
 

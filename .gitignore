@@ -1,6 +1,11 @@
 /bin/
 /meshcore-ninja-api
 *.exe
+/data
+
+# Local runtime configuration. Copy config.example.toml to config.toml.
+/config.toml
+/docker/config.toml
 
 # SQLite counter-persistence files (--db)
 *.db

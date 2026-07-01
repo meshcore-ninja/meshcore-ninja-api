@@ -169,8 +169,9 @@ func (s *Server) summaryFor(ns *NetworkState, now int64) networkSummary {
 
 func (s *Server) handleNetworks(w http.ResponseWriter, r *http.Request) {
 	now := nowUnix()
-	out := make([]networkSummary, 0, len(s.store.Networks))
-	for _, ns := range s.store.Networks {
+	networks := s.store.NetworksSnapshot()
+	out := make([]networkSummary, 0, len(networks))
+	for _, ns := range networks {
 		out = append(out, s.summaryFor(ns, now))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"networks": out})
@@ -557,7 +558,7 @@ func (s *Server) searchOptions() []searchOptionCommand {
 	countries := map[string]bool{}
 	regions := map[string]bool{}
 	if s.store != nil {
-		for _, ns := range s.store.Networks {
+		for _, ns := range s.store.NetworksSnapshot() {
 			for _, cc := range ns.Countries {
 				countries[cc] = true
 			}
@@ -620,7 +621,7 @@ func (s *Server) expandNetworkMetadata(p *MapParams) {
 		return
 	}
 	metaNetworks := map[string]bool{}
-	for _, ns := range s.store.Networks {
+	for _, ns := range s.store.NetworksSnapshot() {
 		countryOK := len(p.Countries) == 0
 		for _, cc := range ns.Countries {
 			if p.Countries[cc] {
@@ -655,7 +656,7 @@ func (s *Server) supportedSearchMeta() (map[string]bool, map[string]bool) {
 	if s.store == nil {
 		return countries, regions
 	}
-	for _, ns := range s.store.Networks {
+	for _, ns := range s.store.NetworksSnapshot() {
 		for _, cc := range ns.Countries {
 			countries[cc] = true
 		}
@@ -1172,7 +1173,8 @@ func (s *Server) handleObservers(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	now := nowUnix()
 	analyzers, connected := 0, 0
-	for _, ns := range s.store.Networks {
+	networks := s.store.NetworksSnapshot()
+	for _, ns := range networks {
 		for _, a := range ns.Analyzers {
 			analyzers++
 			if ok, _, _ := a.status(); ok {
@@ -1182,7 +1184,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":                 true,
-		"networks":           len(s.store.Networks),
+		"networks":           len(networks),
 		"analyzers":          analyzers,
 		"analyzersConnected": connected,
 		"time":               now,
