@@ -1,0 +1,18 @@
+# Local development configuration. This assumes this repository lives next to
+# the MeshCore Ninja web catalog repository.
+
+addr = ":8089"
+data = "../meshcore-ninja/data"
+allow_origin = "*"
+tangleveil = "wss://tangleveil.meshcore.ninja/ws"
+
+dedup_window = "15m"
+link_halflife = "24h"
+observer_ttl = "1h"
+
+db = "meshcore.db"
+persist_interval = "20s"
+observer_persist_interval = "12s"
+
+import_url = "https://map.meshcore.io/api/v1/nodes?binary=0&short=0"
+import_interval = "1h"

@@ -18,6 +18,7 @@ RUN apt-get update \
  && mkdir -p /app/data /app/state
 WORKDIR /app
 COPY --from=build /out/meshcore-ninja-api /usr/local/bin/meshcore-ninja-api
+COPY docker/config.toml /app/config.toml
 EXPOSE 8080
 ENTRYPOINT ["meshcore-ninja-api"]
-CMD ["--data", "/app/data", "--addr", ":8080", "--db", "/app/state/meshcore.db"]
+CMD ["--config", "/app/config.toml"]

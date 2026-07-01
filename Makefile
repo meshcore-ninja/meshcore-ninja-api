@@ -2,9 +2,7 @@
 
 GO ?= go
 API_BIN ?= bin/meshcore-ninja-api
-API_ADDR ?= :8089
-DATA_DIR ?= ../meshcore-ninja/data
-TANGLEVEIL_URL ?= wss://tangleveil.meshcore.ninja/ws
+API_CONFIG ?= config.toml
 API_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 .DEFAULT_GOAL := help
@@ -20,8 +18,8 @@ build: ## Compile the API
 	$(GO) build -ldflags "-X main.version=$(API_VERSION)" -o $(API_BIN) .
 
 .PHONY: run
-run: ## Run the API against the sibling meshcore-ninja data directory
-	$(GO) run . --data $(DATA_DIR) --addr $(API_ADDR) --tangleveil $(TANGLEVEIL_URL)
+run: ## Run the API with the TOML config file
+	$(GO) run . --config $(API_CONFIG)
 
 .PHONY: test
 test: ## Run Go tests

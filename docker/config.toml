@@ -1,0 +1,15 @@
+addr = ":8080"
+data = "/app/data"
+allow_origin = "*"
+tangleveil = ""
+
+dedup_window = "15m"
+link_halflife = "24h"
+observer_ttl = "1h"
+
+db = "/app/state/meshcore.db"
+persist_interval = "20s"
+observer_persist_interval = "12s"
+
+import_url = "https://map.meshcore.io/api/v1/nodes?binary=0&short=0"
+import_interval = "1h"

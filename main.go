@@ -16,21 +16,15 @@ import (
 )
 
 func main() {
-	addr := flag.String("addr", ":8080", "HTTP listen address")
-	dataDir := flag.String("data", "../data", "path to the repo's data/ directory")
-	allowOrigin := flag.String("allow-origin", "*", "Access-Control-Allow-Origin value")
-	tangleveilURL := flag.String("tangleveil", "", "Tangleveil WebSocket URL (wss://…); when set, all CoreScope streams are consumed through Tangleveil instead of connecting to analyzers directly")
-	dedupWindow := flag.Duration("dedup-window", 15*time.Minute, "how long a content hash counts as already-seen")
-	linkHalfLife := flag.Duration("link-halflife", 24*time.Hour, "half-life of a link's recent-activity score")
-	observerTTL := flag.Duration("observer-ttl", time.Hour, "drop observers/nodes idle longer than this")
-	dbPath := flag.String("db", "meshcore.db", "SQLite file for persisting counters across restarts (empty = in-memory only)")
-	persistEvery := flag.Duration("persist-interval", 20*time.Second, "how often to flush counters/nodes to --db")
-	observerPersistEvery := flag.Duration("observer-persist-interval", 12*time.Second, "how often to flush observer activity to --db")
-	importURL := flag.String("import-url", defaultImportURL, "external node directory to mirror hourly (empty = disabled)")
-	importEvery := flag.Duration("import-interval", time.Hour, "how often to sync the external node directory")
+	configPath, explicitConfig := configPathFromArgs(os.Args[1:])
+	fileConfig, err := LoadAppConfig(configPath, explicitConfig)
+	if err != nil {
+		log.Fatal(err)
+	}
+	cfg := bindConfigFlags(flag.CommandLine, fileConfig, configPath)
 	flag.Parse()
 
-	configs, err := LoadNetworks(*dataDir)
+	configs, err := LoadNetworks(cfg.DataDir)
 	if err != nil {
 		log.Fatalf("loading networks: %v", err)
 	}
@@ -38,12 +32,12 @@ func main() {
 	for _, c := range configs {
 		analyzerCount += len(c.Analyzers)
 	}
-	log.Printf("loaded %d networks with %d analyzers from %s", len(configs), analyzerCount, *dataDir)
+	log.Printf("loaded %d networks with %d analyzers from %s", len(configs), analyzerCount, cfg.DataDir)
 
 	store := NewStore(configs)
 	registry := newNodeRegistry(defaultAdvertsPerNode)
 	observers := newObserverRegistry()
-	links := newLinkRegistry(linkHalfLife.Seconds())
+	links := newLinkRegistry(cfg.LinkHalfLife.Std().Seconds())
 	imported := newImportRegistry()
 	metrics := NewMetrics()
 
@@ -67,14 +61,14 @@ func main() {
 	// so a slow startup points at the offending query.
 	var db *DB
 	loadAdverts := false // backfill per-node advert history in the background after startup
-	if *dbPath != "" {
+	if cfg.DBPath != "" {
 		bootStart := time.Now()
 		t := time.Now()
-		db, err = OpenDB(*dbPath)
+		db, err = OpenDB(cfg.DBPath)
 		if err != nil {
-			log.Fatalf("opening db %s: %v", *dbPath, err)
+			log.Fatalf("opening db %s: %v", cfg.DBPath, err)
 		}
-		log.Printf("startup: opened db %s in %s", *dbPath, time.Since(t).Round(time.Millisecond))
+		log.Printf("startup: opened db %s in %s", cfg.DBPath, time.Since(t).Round(time.Millisecond))
 		defer db.Close()
 
 		t = time.Now()
@@ -146,13 +140,13 @@ func main() {
 
 	// One collector goroutine per analyzer, or a single Tangleveil collector
 	// that multiplexes all streams when --tangleveil is set.
-	if *tangleveilURL != "" {
-		tv, err := NewTangleveilCollector(*tangleveilURL, store, registry, observers, links, metrics)
+	if cfg.TangleveilURL != "" {
+		tv, err := NewTangleveilCollector(cfg.TangleveilURL, store, registry, observers, links, metrics)
 		if err != nil {
 			log.Fatalf("tangleveil: %v", err)
 		}
 		go tv.Run(ctx)
-		log.Printf("tangleveil: routing %d network source(s) through %s", len(tv.routes), *tangleveilURL)
+		log.Printf("tangleveil: routing %d network source(s) through %s", len(tv.routes), cfg.TangleveilURL)
 	} else {
 		for _, ns := range store.Networks {
 			for _, az := range ns.Analyzers {
@@ -168,8 +162,8 @@ func main() {
 
 	// Mirror the external node directory (map.meshcore.io) on its own schedule
 	// into a separate table/registry, kept apart from our live-observed nodes.
-	if *importURL != "" {
-		go newImporter(*importURL, *importEvery, imported, db).Run(ctx)
+	if cfg.ImportURL != "" {
+		go newImporter(cfg.ImportURL, cfg.ImportInterval.Std(), imported, db).Run(ctx)
 	}
 
 	// Periodic sweep to keep dedup/observer maps bounded.
@@ -182,8 +176,8 @@ func main() {
 				return
 			case <-ticker.C:
 				now := nowUnix()
-				store.sweep(now, int64(dedupWindow.Seconds()), int64(observerTTL.Seconds()))
-				links.sweep(now, int64(dedupWindow.Seconds()))
+				store.sweep(now, int64(cfg.DedupWindow.Std().Seconds()), int64(cfg.ObserverTTL.Std().Seconds()))
+				links.sweep(now, int64(cfg.DedupWindow.Std().Seconds()))
 			}
 		}
 	}()
@@ -192,7 +186,7 @@ func main() {
 	// the latest state is captured before exit.
 	if db != nil {
 		go func() {
-			ticker := time.NewTicker(*persistEvery)
+			ticker := time.NewTicker(cfg.PersistInterval.Std())
 			defer ticker.Stop()
 			flush := func() {
 				now := nowUnix()
@@ -247,7 +241,7 @@ func main() {
 		// Observer activity flushes on its own (shorter) interval so the
 		// "latest activity" table stays close to real time.
 		go func() {
-			ticker := time.NewTicker(*observerPersistEvery)
+			ticker := time.NewTicker(cfg.ObserverPersistInterval.Std())
 			defer ticker.Stop()
 			flush := func() {
 				obs := observers.Export()
@@ -271,8 +265,8 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:         *addr,
-		Handler:      NewServer(store, registry, observers, links, imported, db, metrics, hub, *allowOrigin).Handler(),
+		Addr:         cfg.Addr,
+		Handler:      NewServer(store, registry, observers, links, imported, db, metrics, hub, cfg.AllowOrigin).Handler(),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 15 * time.Second,
 	}
@@ -284,7 +278,7 @@ func main() {
 		_ = srv.Shutdown(shutCtx)
 	}()
 
-	log.Printf("listening on %s", *addr)
+	log.Printf("listening on %s", cfg.Addr)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("http server: %v", err)
 	}

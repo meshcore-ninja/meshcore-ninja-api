@@ -49,7 +49,7 @@ bytes (`raw_hex`) with `meshpkt` to recover the node's public key, name, type
   history table below.
 
 The node overview is kept in memory and flushed to SQLite (one `nodes` row per
-node, with the network set as a JSON column) on the same `--persist-interval` as
+node, with the network set as a JSON column) on the same `persist_interval` as
 the counters. In addition, **every** advert is appended to a separate, append-only
 `adverts` history table (one row per advert, ordered by arrival `id`), so the full
 advert history is available in SQL for analytics — not just the last 10 per node.
@@ -69,11 +69,11 @@ real time.
 ## Run
 
 ```bash
-go run . --data ../meshcore-ninja/data --addr :8080
+go run . --config config.toml
 ```
 
-When this repository sits next to the web catalog repository, the Makefile uses
-that same sibling data path:
+When this repository sits next to the web catalog repository, the tracked
+`config.toml` already points at `../meshcore-ninja/data`:
 
 ```bash
 make run
@@ -90,22 +90,54 @@ docker run --rm -p 8080:8080 \
 
 The image reads catalog data from `/app/data`, listens on `:8080`, and stores
 SQLite state at `/app/state/meshcore.db` by default. Mount a catalog data
-directory or override the command arguments to use a different path or flags.
+directory or mount your own TOML file over `/app/config.toml`.
 
-Flags:
+## Configuration
 
-| flag | default | meaning |
-|------|---------|---------|
-| `--addr` | `:8080` | HTTP listen address |
-| `--data` | `../data` | path to the MeshCore Ninja catalog `data/` directory |
-| `--allow-origin` | `*` | `Access-Control-Allow-Origin` value |
-| `--dedup-window` | `15m` | how long a content hash counts as already-seen |
-| `--observer-ttl` | `1h` | drop observers/nodes idle longer than this |
-| `--db` | `meshcore.db` | SQLite file for persisting counters across restarts; empty = in-memory only |
-| `--persist-interval` | `20s` | how often to flush counters/nodes to `--db` |
-| `--observer-persist-interval` | `12s` | how often to flush observer activity to `--db` |
-| `--import-url` | `https://map.meshcore.io/api/v1/nodes?binary=0&short=0` | external node directory to mirror; empty disables |
-| `--import-interval` | `1h` | how often to sync the external node directory |
+Runtime configuration lives in a TOML file. The binary reads `config.toml` by
+default, or a custom path with `--config`:
+
+```bash
+meshcore-ninja-api --config /etc/meshcore-ninja-api.toml
+```
+
+Flags with the same names as the previous CLI options still work as explicit
+overrides after the TOML file is loaded.
+
+```toml
+addr = ":8080"
+data = "/app/data"
+allow_origin = "*"
+tangleveil = ""
+
+dedup_window = "15m"
+link_halflife = "24h"
+observer_ttl = "1h"
+
+db = "/app/state/meshcore.db"
+persist_interval = "20s"
+observer_persist_interval = "12s"
+
+import_url = "https://map.meshcore.io/api/v1/nodes?binary=0&short=0"
+import_interval = "1h"
+```
+
+Config keys:
+
+| key | default | meaning |
+|-----|---------|---------|
+| `addr` | `:8080` | HTTP listen address |
+| `data` | `../data` | path to the MeshCore Ninja catalog `data/` directory |
+| `allow_origin` | `*` | `Access-Control-Allow-Origin` value |
+| `tangleveil` | empty | Tangleveil WebSocket URL; when set, all CoreScope streams are consumed through Tangleveil |
+| `dedup_window` | `15m` | how long a content hash counts as already-seen |
+| `link_halflife` | `24h` | half-life of a link's recent-activity score |
+| `observer_ttl` | `1h` | drop observers/nodes idle longer than this |
+| `db` | `meshcore.db` | SQLite file for persisting counters across restarts; empty = in-memory only |
+| `persist_interval` | `20s` | how often to flush counters/nodes to `db` |
+| `observer_persist_interval` | `12s` | how often to flush observer activity to `db` |
+| `import_url` | `https://map.meshcore.io/api/v1/nodes?binary=0&short=0` | external node directory to mirror; empty disables |
+| `import_interval` | `1h` | how often to sync the external node directory |
 
 Dedup/observer/node maps are swept every minute to stay bounded. Analyzer
 connections reconnect with exponential backoff (1s→30s); non-CoreScope or
@@ -115,11 +147,11 @@ unreachable URLs are retried harmlessly.
 
 Counters persist to `meshcore.db` by default, using the pure-Go
 [`modernc.org/sqlite`](https://modernc.org/sqlite) driver (no cgo). Every
-`--persist-interval` (and once on shutdown) each scope's durable state —
+`persist_interval` (and once on shutdown) each scope's durable state —
 cumulative totals, payload-type breakdown, and the node/observer sets — is
 upserted as one row per scope, so totals and gauges continue across restarts.
 The short-lived dedup maps and the pkt/m rate window are not persisted; they
-rebuild on their own within their windows. Pass `--db ""` to disable persistence
+rebuild on their own within their windows. Set `db = ""` to disable persistence
 and keep counters in-memory only.
 
 ## Endpoints
@@ -164,7 +196,7 @@ truncated the result).
 
 Separately from the live-observed registry, the service mirrors the public
 [map.meshcore.io](https://map.meshcore.io) node directory (~50k
-manually-submitted / scanned nodes) every `--import-interval` into its own
+manually-submitted / scanned nodes) every `import_interval` into its own
 `imported_nodes` SQLite table, storing every upstream field verbatim
 (`public_key`, `type`, `adv_name`, `last_advert`, `adv_lat`/`adv_lon`, `params`,
 `link`, `source`, `inserted_by`/`updated_by`, …). This third-party data is kept
@@ -175,8 +207,8 @@ These nodes are merged into `/api/map` results, tagged `imported: true` (with th
 upstream `source`) so the frontend can render them at reduced opacity and toggle
 them off. They are deduped against the live registry by public key — a
 live-observed node always wins — and null-island (`0,0`) entries are dropped. The
-mirror is restored from `--db` on startup so the map has data before the first
-sync completes; pass `--import-url ""` to disable the mirror entirely.
+mirror is restored from `db` on startup so the map has data before the first
+sync completes; set `import_url = ""` to disable the mirror entirely.
 
 `networkSummary`:
 
