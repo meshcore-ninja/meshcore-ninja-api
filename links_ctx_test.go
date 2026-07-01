@@ -21,8 +21,8 @@ func TestLinkDirectionAndSources(t *testing.T) {
 	if la.PacketCount != 2 {
 		t.Errorf("packetCount = %d, want 2", la.PacketCount)
 	}
-	if la.LastHash != "h1" {
-		t.Errorf("from A lastHash = %q, want h1", la.LastHash)
+	if la.LastHashSentByNode != "h1" || la.LastHashRecvByNode != "h2" {
+		t.Errorf("from A hashes sent=%q recv=%q, want h1/h2", la.LastHashSentByNode, la.LastHashRecvByNode)
 	}
 	if la.Sources["flood"] != 1 || la.Sources["direct"] != 1 {
 		t.Errorf("sources = %v, want flood:1 direct:1", la.Sources)
@@ -33,8 +33,8 @@ func TestLinkDirectionAndSources(t *testing.T) {
 	if lb.SentByNode != 1 || lb.RecvByNode != 1 {
 		t.Errorf("from B: sent=%d recv=%d, want 1/1", lb.SentByNode, lb.RecvByNode)
 	}
-	if lb.LastHash != "h2" {
-		t.Errorf("from B lastHash = %q, want h2", lb.LastHash)
+	if lb.LastHashSentByNode != "h2" || lb.LastHashRecvByNode != "h1" {
+		t.Errorf("from B hashes sent=%q recv=%q, want h2/h1", lb.LastHashSentByNode, lb.LastHashRecvByNode)
 	}
 }
 
@@ -76,12 +76,12 @@ func TestLinkSNRAttribution(t *testing.T) {
 	})
 
 	ab := mustNeighbor(t, reg, a, b)
-	if !ab.HasSNR || ab.LastSNR != 7.25 {
-		t.Errorf("A—B snr: has=%v val=%.2f, want true/7.25", ab.HasSNR, ab.LastSNR)
+	if !ab.HasSNRSentByNode || ab.LastSNRSentByNode != 7.25 {
+		t.Errorf("A—B sent snr: has=%v val=%.2f, want true/7.25", ab.HasSNRSentByNode, ab.LastSNRSentByNode)
 	}
 	bc := mustNeighbor(t, reg, b, c)
-	if !bc.HasSNR || bc.LastSNR != -3.0 {
-		t.Errorf("B—C snr: has=%v val=%.2f, want true/-3.00", bc.HasSNR, bc.LastSNR)
+	if !bc.HasSNRSentByNode || bc.LastSNRSentByNode != -3.0 {
+		t.Errorf("B—C sent snr: has=%v val=%.2f, want true/-3.00", bc.HasSNRSentByNode, bc.LastSNRSentByNode)
 	}
 }
 
@@ -100,14 +100,17 @@ func TestLinkSNRHistoryIsDirectionalAndCapped(t *testing.T) {
 
 	fromA := mustNeighbor(t, reg, a, b)
 	wantA := []float64{2, 3, 4, 5, 6}
-	if !equalFloatSlices(fromA.SNRs, wantA) || !fromA.HasSNR || fromA.LastSNR != 6 {
-		t.Errorf("A->B snrs=%v has=%v last=%.2f, want %v true/6", fromA.SNRs, fromA.HasSNR, fromA.LastSNR, wantA)
+	if !equalFloatSlices(fromA.SNRSentByNode, wantA) || !fromA.HasSNRSentByNode || fromA.LastSNRSentByNode != 6 {
+		t.Errorf("A->B sent snrs=%v has=%v last=%.2f, want %v true/6", fromA.SNRSentByNode, fromA.HasSNRSentByNode, fromA.LastSNRSentByNode, wantA)
+	}
+	if !equalFloatSlices(fromA.SNRRecvByNode, []float64{-1.5, -2.5}) || !fromA.HasSNRRecvByNode || fromA.LastSNRRecvByNode != -2.5 {
+		t.Errorf("A recv snrs=%v has=%v last=%.2f, want [-1.5 -2.5] true/-2.5", fromA.SNRRecvByNode, fromA.HasSNRRecvByNode, fromA.LastSNRRecvByNode)
 	}
 
 	fromB := mustNeighbor(t, reg, b, a)
 	wantB := []float64{-1.5, -2.5}
-	if !equalFloatSlices(fromB.SNRs, wantB) || !fromB.HasSNR || fromB.LastSNR != -2.5 {
-		t.Errorf("B->A snrs=%v has=%v last=%.2f, want %v true/-2.5", fromB.SNRs, fromB.HasSNR, fromB.LastSNR, wantB)
+	if !equalFloatSlices(fromB.SNRSentByNode, wantB) || !fromB.HasSNRSentByNode || fromB.LastSNRSentByNode != -2.5 {
+		t.Errorf("B->A sent snrs=%v has=%v last=%.2f, want %v true/-2.5", fromB.SNRSentByNode, fromB.HasSNRSentByNode, fromB.LastSNRSentByNode, wantB)
 	}
 }
 
@@ -198,14 +201,14 @@ func TestLinkPersistenceRoundTrip(t *testing.T) {
 	if l.Sources["flood"] != 1 || l.Sources["direct"] != 1 {
 		t.Errorf("sources = %v, want flood:1 direct:1", l.Sources)
 	}
-	if l.LastHash != "h1" {
-		t.Errorf("A->B lastHash = %q, want h1", l.LastHash)
+	if l.LastHashSentByNode != "h1" || l.LastHashRecvByNode != "h2" {
+		t.Errorf("A hashes sent=%q recv=%q, want h1/h2", l.LastHashSentByNode, l.LastHashRecvByNode)
 	}
-	if !l.HasSNR || l.LastSNR != 9.5 || !equalFloatSlices(l.SNRs, []float64{9.5}) {
-		t.Errorf("A->B snr has=%v val=%.2f history=%v, want true/9.50/[9.5]", l.HasSNR, l.LastSNR, l.SNRs)
+	if !l.HasSNRSentByNode || l.LastSNRSentByNode != 9.5 || !equalFloatSlices(l.SNRSentByNode, []float64{9.5}) {
+		t.Errorf("A->B sent snr has=%v val=%.2f history=%v, want true/9.50/[9.5]", l.HasSNRSentByNode, l.LastSNRSentByNode, l.SNRSentByNode)
 	}
-	if rev := mustNeighbor(t, dst, b, a); rev.LastHash != "h2" || !rev.HasSNR || rev.LastSNR != -4.5 || !equalFloatSlices(rev.SNRs, []float64{-4.5}) {
-		t.Errorf("B->A hash=%q snr has=%v val=%.2f history=%v, want h2 true/-4.50/[-4.5]", rev.LastHash, rev.HasSNR, rev.LastSNR, rev.SNRs)
+	if rev := mustNeighbor(t, dst, b, a); rev.LastHashSentByNode != "h2" || rev.LastHashRecvByNode != "h1" || !rev.HasSNRSentByNode || rev.LastSNRSentByNode != -4.5 || !equalFloatSlices(rev.SNRSentByNode, []float64{-4.5}) {
+		t.Errorf("B hashes sent=%q recv=%q snr has=%v val=%.2f history=%v, want h2/h1 true/-4.50/[-4.5]", rev.LastHashSentByNode, rev.LastHashRecvByNode, rev.HasSNRSentByNode, rev.LastSNRSentByNode, rev.SNRSentByNode)
 	}
 	if !l.Moved || l.SegmentCount != 1 {
 		t.Errorf("geometry moved=%v segs=%d, want true/1", l.Moved, l.SegmentCount)

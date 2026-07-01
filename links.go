@@ -16,7 +16,8 @@ import (
 //
 // Only adjacent entries in resolved_path create a link: a path A→B→C→D yields
 // A—B, B—C, C—D and nothing else (no A—C, A—D, B—D). Links are undirected, so
-// A—B == B—A. The link to the analyzer observer is never inferred.
+// A—B == B—A. When the packet observer is itself a full node pubkey, the
+// collector appends it as the final receiving hop before recording links.
 
 // defaultLinkHalfLife is the half-life (seconds) of a link's recent-activity
 // score: 24h by default. Each globally-deduplicated packet-link event adds 1 to
@@ -497,13 +498,17 @@ type LinkNeighbor struct {
 	// Direction relative to the selected node: SentByNode counts events where the
 	// node was the sender (node→neighbor), RecvByNode where it received
 	// (neighbor→node). They sum to PacketCount.
-	SentByNode uint64
-	RecvByNode uint64
-	LastHash   string  // content hash of the most recent node->neighbor packet
-	LastSNR    float64 // best-effort per-hop SNR (dB), valid when HasSNR
-	HasSNR     bool
-	SNRs       []float64         // last SNRs for node->neighbor direction, oldest first
-	Sources    map[string]uint64 // counted events by route type
+	SentByNode         uint64
+	RecvByNode         uint64
+	LastHashSentByNode string
+	LastHashRecvByNode string
+	LastSNRSentByNode  float64
+	HasSNRSentByNode   bool
+	LastSNRRecvByNode  float64
+	HasSNRRecvByNode   bool
+	SNRSentByNode      []float64         // last SNRs for node->neighbor direction, oldest first
+	SNRRecvByNode      []float64         // last SNRs for neighbor->node direction, oldest first
+	Sources            map[string]uint64 // counted events by route type
 
 	// Geometry from the current position segment, in the selected node's frame.
 	HasPos       bool
@@ -556,18 +561,24 @@ func (r *LinkRegistry) LinksForNode(node pubKey, now int64) []LinkNeighbor {
 			}
 			if nodeIsA {
 				ln.SentByNode, ln.RecvByNode = rec.DirAB, rec.DirBA
-				ln.LastHash = rec.LastHashAB
-				ln.SNRs = append([]float64(nil), rec.SNRsAB...)
+				ln.LastHashSentByNode, ln.LastHashRecvByNode = rec.LastHashAB, rec.LastHashBA
+				ln.SNRSentByNode = append([]float64(nil), rec.SNRsAB...)
+				ln.SNRRecvByNode = append([]float64(nil), rec.SNRsBA...)
 				ln.NodeLat, ln.NodeLon, ln.NeighborLat, ln.NeighborLon = rec.LatA, rec.LonA, rec.LatB, rec.LonB
 			} else {
 				ln.SentByNode, ln.RecvByNode = rec.DirBA, rec.DirAB
-				ln.LastHash = rec.LastHashBA
-				ln.SNRs = append([]float64(nil), rec.SNRsBA...)
+				ln.LastHashSentByNode, ln.LastHashRecvByNode = rec.LastHashBA, rec.LastHashAB
+				ln.SNRSentByNode = append([]float64(nil), rec.SNRsBA...)
+				ln.SNRRecvByNode = append([]float64(nil), rec.SNRsAB...)
 				ln.NodeLat, ln.NodeLon, ln.NeighborLat, ln.NeighborLon = rec.LatB, rec.LonB, rec.LatA, rec.LonA
 			}
-			if len(ln.SNRs) > 0 {
-				ln.LastSNR = ln.SNRs[len(ln.SNRs)-1]
-				ln.HasSNR = true
+			if len(ln.SNRSentByNode) > 0 {
+				ln.LastSNRSentByNode = ln.SNRSentByNode[len(ln.SNRSentByNode)-1]
+				ln.HasSNRSentByNode = true
+			}
+			if len(ln.SNRRecvByNode) > 0 {
+				ln.LastSNRRecvByNode = ln.SNRRecvByNode[len(ln.SNRRecvByNode)-1]
+				ln.HasSNRRecvByNode = true
 			}
 			out = append(out, ln)
 		}

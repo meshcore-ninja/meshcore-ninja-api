@@ -345,6 +345,19 @@ type NodeView struct {
 	// node also appears in that directory (regardless of source).
 	Source string `json:"source,omitempty"`
 	OnMap  bool   `json:"onMap"`
+	// Observer is present when this node's public key is also reporting packets
+	// as an observer.
+	IsObserver bool              `json:"isObserver"`
+	Observer   *NodeObserverView `json:"observer,omitempty"`
+}
+
+type NodeObserverView struct {
+	ObserverID   string   `json:"observerId"`
+	Name         string   `json:"name,omitempty"`
+	FirstSeen    int64    `json:"firstSeen"`
+	LastSeen     int64    `json:"lastSeen"`
+	Observations uint64   `json:"observations"`
+	Networks     []string `json:"networks"`
 }
 
 func advertViews(adverts []AdvertObservation) []AdvertView {

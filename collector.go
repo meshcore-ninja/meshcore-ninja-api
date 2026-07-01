@@ -16,9 +16,10 @@ type wsEnvelope struct {
 }
 
 // wsPacket is the subset of a CoreScope packet record we consume. resolved_path
-// is the list of full node public keys the packet traversed (sender + relays),
-// used to count distinct mesh nodes. raw_hex is the wire-format packet, decoded
-// locally for ADVERTs to extract node identity (pubkey, name, type, location).
+// is the list of full node public keys the packet traversed (sender + relays).
+// If observer_id is also a full node key, link collection treats it as the final
+// receiving hop. raw_hex is the wire-format packet, decoded locally for ADVERTs
+// to extract node identity (pubkey, name, type, location).
 type wsPacket struct {
 	Hash         string   `json:"hash"`
 	RawHex       string   `json:"raw_hex"`
@@ -97,7 +98,7 @@ func (c *Collector) handle(data []byte) {
 		obs := PathObservation{
 			Hash:      hash,
 			NetworkID: c.net.ID,
-			Path:      p.ResolvedPath,
+			Path:      pathWithObserverReceiver(p.ResolvedPath, p.ObserverID),
 			Now:       now,
 		}
 		if raw := decodeRawHex(p.RawHex); len(raw) > 0 {
@@ -131,6 +132,18 @@ func decodeRawHex(rawHex string) []byte {
 		return nil
 	}
 	return raw
+}
+
+func pathWithObserverReceiver(path []string, observerID string) []string {
+	observerID = strings.ToLower(strings.TrimSpace(observerID))
+	if _, ok := normalizePub(observerID); !ok {
+		return path
+	}
+	if len(path) > 0 && strings.EqualFold(strings.TrimSpace(path[len(path)-1]), observerID) {
+		return path
+	}
+	out := append([]string(nil), path...)
+	return append(out, observerID)
 }
 
 // routeTypeName maps the 2-bit route type in a packet header to a short label,

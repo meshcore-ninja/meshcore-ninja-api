@@ -403,8 +403,12 @@ func (s *Server) handleNetworkDetail(w http.ResponseWriter, r *http.Request) {
 // handleNodes serves the global node registry overview. Each node carries the
 // set of networks it has been heard on and its own rolling list of recent adverts.
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
+	nodes := s.nodes.Snapshot()
+	for i := range nodes {
+		s.enrichNodeObserver(&nodes[i])
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"nodes": s.nodes.Snapshot(),
+		"nodes": nodes,
 	})
 }
 
@@ -438,13 +442,16 @@ type linkView struct {
 	Networks       []string         `json:"networks"`
 	// Direction relative to the selected node: how many counted packets it sent to
 	// vs received from this neighbor. Exposes asymmetric (one-way) links.
-	SentByNode uint64            `json:"sentByNode"`
-	RecvByNode uint64            `json:"recvByNode"`
-	LastHash   string            `json:"lastHash,omitempty"` // most recent packet hash for selected node->neighbor
-	LastSNR    *float64          `json:"lastSnr,omitempty"`  // best-effort per-hop SNR (dB) from a TRACE, if any
-	SNRs       []float64         `json:"snrs,omitempty"`     // last SNRs for the selected node->neighbor direction
-	Sources    map[string]uint64 `json:"sources,omitempty"`  // counted events by route type (flood/direct/…)
-	Geometry   *linkGeometryView `json:"geometry,omitempty"` // endpoint positions at observation, if known
+	SentByNode         uint64            `json:"sentByNode"`
+	RecvByNode         uint64            `json:"recvByNode"`
+	LastHashSentByNode string            `json:"lastHashSentByNode,omitempty"`
+	LastHashRecvByNode string            `json:"lastHashRecvByNode,omitempty"`
+	LastSNRSentByNode  *float64          `json:"lastSnrSentByNode,omitempty"`
+	LastSNRRecvByNode  *float64          `json:"lastSnrRecvByNode,omitempty"`
+	SNRSentByNode      []float64         `json:"snrsSentByNode,omitempty"`
+	SNRRecvByNode      []float64         `json:"snrsRecvByNode,omitempty"`
+	Sources            map[string]uint64 `json:"sources,omitempty"`  // counted events by route type (flood/direct/…)
+	Geometry           *linkGeometryView `json:"geometry,omitempty"` // endpoint positions at observation, if known
 }
 
 // linkGeometryView is the link's drawable geometry from the selected node's
@@ -628,6 +635,7 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request, rawPub
 	if view, found := s.nodes.GetView(pubHex); found {
 		view.Source = "live"
 		view.OnMap = s.imported != nil && s.imported.Has(pubHex)
+		s.enrichNodeObserver(&view)
 		w.Header().Set("Cache-Control", "public, max-age=15")
 		writeJSON(w, http.StatusOK, view)
 		return
@@ -637,8 +645,10 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request, rawPub
 	// map-only node still has a profile (built from its imported record).
 	if s.imported != nil {
 		if recs := s.imported.ForPubKey(pubHex); len(recs) > 0 {
+			view := importedNodeView(recs[0])
+			s.enrichNodeObserver(&view)
 			w.Header().Set("Cache-Control", "public, max-age=15")
-			writeJSON(w, http.StatusOK, importedNodeView(recs[0]))
+			writeJSON(w, http.StatusOK, view)
 			return
 		}
 	}
@@ -667,6 +677,25 @@ func importedNodeView(n *ImportedNode) NodeView {
 		v.Lon = n.AdvLon
 	}
 	return v
+}
+
+func (s *Server) enrichNodeObserver(v *NodeView) {
+	if s.observers == nil {
+		return
+	}
+	obs, ok := s.observers.Lookup(v.PubKey)
+	if !ok {
+		return
+	}
+	v.IsObserver = true
+	v.Observer = &NodeObserverView{
+		ObserverID:   obs.ObserverID,
+		Name:         obs.Name,
+		FirstSeen:    obs.FirstSeen,
+		LastSeen:     obs.LastSeen,
+		Observations: obs.Observations,
+		Networks:     obs.Networks,
+	}
 }
 
 // advert history endpoint defaults: 50 adverts per page, hard-capped at 500.
@@ -1193,21 +1222,27 @@ func (s *Server) handleNodeLinks(w http.ResponseWriter, r *http.Request, rawPub 
 	views := make([]linkView, 0, len(filtered))
 	for _, l := range filtered {
 		v := linkView{
-			Neighbor:       s.neighborView(l.Neighbor, imported),
-			PacketCount:    l.PacketCount,
-			RecentActivity: round2(l.RecentActivity),
-			FirstSeen:      l.FirstSeen,
-			LastSeen:       l.LastSeen,
-			Networks:       l.Networks,
-			SentByNode:     l.SentByNode,
-			RecvByNode:     l.RecvByNode,
-			LastHash:       l.LastHash,
-			Sources:        l.Sources,
+			Neighbor:           s.neighborView(l.Neighbor, imported),
+			PacketCount:        l.PacketCount,
+			RecentActivity:     round2(l.RecentActivity),
+			FirstSeen:          l.FirstSeen,
+			LastSeen:           l.LastSeen,
+			Networks:           l.Networks,
+			SentByNode:         l.SentByNode,
+			RecvByNode:         l.RecvByNode,
+			LastHashSentByNode: l.LastHashSentByNode,
+			LastHashRecvByNode: l.LastHashRecvByNode,
+			Sources:            l.Sources,
 		}
-		if l.HasSNR {
-			snr := round2(l.LastSNR)
-			v.LastSNR = &snr
-			v.SNRs = roundFloatSlice(l.SNRs)
+		if l.HasSNRSentByNode {
+			snr := round2(l.LastSNRSentByNode)
+			v.LastSNRSentByNode = &snr
+			v.SNRSentByNode = roundFloatSlice(l.SNRSentByNode)
+		}
+		if l.HasSNRRecvByNode {
+			snr := round2(l.LastSNRRecvByNode)
+			v.LastSNRRecvByNode = &snr
+			v.SNRRecvByNode = roundFloatSlice(l.SNRRecvByNode)
 		}
 		if l.HasPos {
 			v.Geometry = &linkGeometryView{

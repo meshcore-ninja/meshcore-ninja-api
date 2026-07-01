@@ -301,7 +301,7 @@ func main() {
 		})
 	}
 
-	snapshotter := NewMapSnapshotter(registry, imported, cfg.SnapshotDir, cfg.SnapshotBaseURL)
+	snapshotter := NewMapSnapshotter(registry, imported, observers, cfg.SnapshotDir, cfg.SnapshotBaseURL)
 	go snapshotter.Run(ctx, startupDone, cfg.SnapshotInterval.Std())
 
 	// Periodic quality flagging: scan nodes against each network's published

@@ -19,7 +19,7 @@ func newTestSnapshotter(t *testing.T) (*MapSnapshotter, string) {
 	dir := t.TempDir()
 	r := newTestRegistry()
 	imp := newImportRegistry()
-	return NewMapSnapshotter(r, imp, dir, "https://example.com"), dir
+	return NewMapSnapshotter(r, imp, newObserverRegistry(), dir, "https://example.com"), dir
 }
 
 // TestSnapshotAtomicPublication verifies that no .tmp file lingers after a
@@ -78,6 +78,28 @@ func TestSnapshotExcludesLocationFlagged(t *testing.T) {
 		if !found {
 			t.Errorf("expected unflagged node %s in snapshot", want)
 		}
+	}
+}
+
+func TestSnapshotMarksObserverNodes(t *testing.T) {
+	dir := t.TempDir()
+	nodes := newNodeRegistry(defaultAdvertsPerNode)
+	pub := pk(0xcd)
+	seedNode(nodes, pub, "Observer Node", 2, 50.2, 14.5, 1000, "mesh")
+	observers := newObserverRegistry()
+	observers.Observe(ObserverActivity{ObserverID: pub, Name: "Observer One", NetworkID: "mesh", At: 1200})
+	s := NewMapSnapshotter(nodes, newImportRegistry(), observers, dir, "https://example.com")
+
+	tuples := s.collectNodes()
+	if len(tuples) != 1 {
+		t.Fatalf("tuples = %d, want 1", len(tuples))
+	}
+	observer, ok := tuples[0][10].(*NodeObserverView)
+	if !ok || observer == nil {
+		t.Fatalf("observer slot = %#v, want NodeObserverView", tuples[0][10])
+	}
+	if observer.ObserverID != pub || observer.Name != "Observer One" || observer.Observations != 1 {
+		t.Errorf("observer = %+v, want id/name/count", observer)
 	}
 }
 

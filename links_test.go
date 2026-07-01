@@ -218,8 +218,74 @@ func TestLinkRestoreMergesLiveUpdates(t *testing.T) {
 	if len(ab.Networks) != 2 {
 		t.Errorf("merged networks = %v, want old and live", ab.Networks)
 	}
-	if !equalFloatSlices(ab.SNRs, []float64{1, 2, 9}) || ab.LastSNR != 9 {
-		t.Errorf("merged snrs = %v last=%.2f, want [1 2 9]/9", ab.SNRs, ab.LastSNR)
+	if !equalFloatSlices(ab.SNRSentByNode, []float64{1, 2, 9}) || ab.LastSNRSentByNode != 9 {
+		t.Errorf("merged sent snrs = %v last=%.2f, want [1 2 9]/9", ab.SNRSentByNode, ab.LastSNRSentByNode)
+	}
+}
+
+func TestCollectorAppendsNodeObserverAsFinalLinkHop(t *testing.T) {
+	a, b, observer := pk(1), pk(2), pk(3)
+	reg := noDecay()
+	c := &Collector{
+		net:   &NetworkState{ID: "net-a", Counter: newCounter()},
+		az:    &AnalyzerState{Name: "az1", Counter: newCounter()},
+		links: reg,
+	}
+
+	feedPacket(c, wsPacket{
+		Hash:         "h1",
+		ObserverID:   observer,
+		ResolvedPath: []string{a, b},
+	})
+
+	if l := mustNeighbor(t, reg, b, observer); l.SentByNode != 1 || l.LastHashSentByNode != "h1" {
+		t.Errorf("B->observer link = sent %d hash %q, want 1/h1", l.SentByNode, l.LastHashSentByNode)
+	}
+	if _, ok := neighborOf(t, reg, a, observer, 100); ok {
+		t.Error("observer should only attach as the final adjacent hop, not directly to origin")
+	}
+}
+
+func TestCollectorDoesNotAppendNonNodeObserver(t *testing.T) {
+	a, b := pk(1), pk(2)
+	reg := noDecay()
+	c := &Collector{
+		net:   &NetworkState{ID: "net-a", Counter: newCounter()},
+		az:    &AnalyzerState{Name: "az1", Counter: newCounter()},
+		links: reg,
+	}
+
+	feedPacket(c, wsPacket{
+		Hash:         "h1",
+		ObserverID:   "observer-short-id",
+		ResolvedPath: []string{a, b},
+	})
+
+	if l := mustNeighbor(t, reg, a, b); l.PacketCount != 1 {
+		t.Errorf("A-B count = %d, want 1", l.PacketCount)
+	}
+	if links := reg.LinksForNode(mustPub(t, b), 100); len(links) != 1 {
+		t.Errorf("links for B = %d, want only A-B", len(links))
+	}
+}
+
+func TestCollectorDoesNotDuplicateObserverAlreadyInPath(t *testing.T) {
+	a, observer := pk(1), pk(2)
+	reg := noDecay()
+	c := &Collector{
+		net:   &NetworkState{ID: "net-a", Counter: newCounter()},
+		az:    &AnalyzerState{Name: "az1", Counter: newCounter()},
+		links: reg,
+	}
+
+	feedPacket(c, wsPacket{
+		Hash:         "h1",
+		ObserverID:   observer,
+		ResolvedPath: []string{a, observer},
+	})
+
+	if l := mustNeighbor(t, reg, a, observer); l.PacketCount != 1 {
+		t.Errorf("A-observer count = %d, want 1", l.PacketCount)
 	}
 }
 
@@ -389,22 +455,25 @@ func TestNodeLinksEndpointReturnsDirectionalSNRHistory(t *testing.T) {
 	if len(fromA.Links) != 1 {
 		t.Fatalf("from A links = %d, want 1", len(fromA.Links))
 	}
-	if fromA.Links[0].LastSNR == nil || *fromA.Links[0].LastSNR != 2.35 || !equalFloatSlices(fromA.Links[0].SNRs, []float64{1.23, 2.35}) {
-		t.Errorf("from A lastSnr=%v snrs=%v, want 2.35/[1.23 2.35]", fromA.Links[0].LastSNR, fromA.Links[0].SNRs)
+	if fromA.Links[0].LastSNRSentByNode == nil || *fromA.Links[0].LastSNRSentByNode != 2.35 || !equalFloatSlices(fromA.Links[0].SNRSentByNode, []float64{1.23, 2.35}) {
+		t.Errorf("from A sent lastSnr=%v snrs=%v, want 2.35/[1.23 2.35]", fromA.Links[0].LastSNRSentByNode, fromA.Links[0].SNRSentByNode)
 	}
-	if fromA.Links[0].LastHash != "h2" {
-		t.Errorf("from A lastHash=%q, want h2", fromA.Links[0].LastHash)
+	if fromA.Links[0].LastSNRRecvByNode == nil || *fromA.Links[0].LastSNRRecvByNode != -7.88 || !equalFloatSlices(fromA.Links[0].SNRRecvByNode, []float64{-7.88}) {
+		t.Errorf("from A recv lastSnr=%v snrs=%v, want -7.88/[-7.88]", fromA.Links[0].LastSNRRecvByNode, fromA.Links[0].SNRRecvByNode)
+	}
+	if fromA.Links[0].LastHashSentByNode != "h2" || fromA.Links[0].LastHashRecvByNode != "h3" {
+		t.Errorf("from A hashes sent=%q recv=%q, want h2/h3", fromA.Links[0].LastHashSentByNode, fromA.Links[0].LastHashRecvByNode)
 	}
 
 	fromB := getLinks(t, srv, b, "")
 	if len(fromB.Links) != 1 {
 		t.Fatalf("from B links = %d, want 1", len(fromB.Links))
 	}
-	if fromB.Links[0].LastSNR == nil || *fromB.Links[0].LastSNR != -7.88 || !equalFloatSlices(fromB.Links[0].SNRs, []float64{-7.88}) {
-		t.Errorf("from B lastSnr=%v snrs=%v, want -7.88/[-7.88]", fromB.Links[0].LastSNR, fromB.Links[0].SNRs)
+	if fromB.Links[0].LastSNRSentByNode == nil || *fromB.Links[0].LastSNRSentByNode != -7.88 || !equalFloatSlices(fromB.Links[0].SNRSentByNode, []float64{-7.88}) {
+		t.Errorf("from B sent lastSnr=%v snrs=%v, want -7.88/[-7.88]", fromB.Links[0].LastSNRSentByNode, fromB.Links[0].SNRSentByNode)
 	}
-	if fromB.Links[0].LastHash != "h3" {
-		t.Errorf("from B lastHash=%q, want h3", fromB.Links[0].LastHash)
+	if fromB.Links[0].LastHashSentByNode != "h3" || fromB.Links[0].LastHashRecvByNode != "h2" {
+		t.Errorf("from B hashes sent=%q recv=%q, want h3/h2", fromB.Links[0].LastHashSentByNode, fromB.Links[0].LastHashRecvByNode)
 	}
 }
 

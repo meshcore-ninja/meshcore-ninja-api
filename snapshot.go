@@ -19,20 +19,21 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-const snapshotFormatVersion = 2
+const snapshotFormatVersion = 3
 
 // snapshotPayload is the full-map snapshot written to disk as a zstd-compressed
 // JSON file. Nodes is a compact array-of-arrays; each inner tuple is:
-// [pubkey, name, nodeType, lat, lon, lastAdvertAt, advertCount, networks[], freqMHz, flags[]].
+// [pubkey, name, nodeType, lat, lon, lastAdvertAt, advertCount, networks[], freqMHz, flags[], observer].
 // advertCount=0 marks imported (map.meshcore.io) nodes that carry no network
 // membership; live nodes always have advertCount≥1. freqMHz is the imported
 // node's radio frequency (0 for live nodes, which band via their networks).
 // flags are the Flagger's quality tags (e.g. "far_from_network"), empty for
-// imported nodes which the scan does not evaluate.
+// imported nodes which the scan does not evaluate. observer is null unless the
+// node's pubkey is also an observer id.
 type snapshotPayload struct {
 	FormatVersion int       `json:"formatVersion"`
 	GeneratedAt   string    `json:"generatedAt"`
-	Nodes         [][10]any `json:"nodes"`
+	Nodes         [][11]any `json:"nodes"`
 }
 
 // SnapshotManifest is written to latest.json alongside the snapshot files and
@@ -49,10 +50,11 @@ type SnapshotManifest struct {
 // them over HTTP. Snapshots are zstd-compressed and written atomically; only
 // the two most recent files are kept.
 type MapSnapshotter struct {
-	nodes    *NodeRegistry
-	imported *ImportRegistry
-	dir      string
-	baseURL  string // e.g. "https://meshcore.ninja" — appended with /api/snapshots/...
+	nodes     *NodeRegistry
+	imported  *ImportRegistry
+	observers *ObserverRegistry
+	dir       string
+	baseURL   string // e.g. "https://meshcore.ninja" — appended with /api/snapshots/...
 
 	mu       sync.Mutex
 	manifest *SnapshotManifest
@@ -61,12 +63,13 @@ type MapSnapshotter struct {
 // NewMapSnapshotter creates a snapshotter. dir is the on-disk directory for
 // snapshot files; baseURL is the public origin prepended to snapshot URLs in
 // the manifest (no trailing slash).
-func NewMapSnapshotter(nodes *NodeRegistry, imported *ImportRegistry, dir, baseURL string) *MapSnapshotter {
+func NewMapSnapshotter(nodes *NodeRegistry, imported *ImportRegistry, observers *ObserverRegistry, dir, baseURL string) *MapSnapshotter {
 	return &MapSnapshotter{
-		nodes:    nodes,
-		imported: imported,
-		dir:      dir,
-		baseURL:  baseURL,
+		nodes:     nodes,
+		imported:  imported,
+		observers: observers,
+		dir:       dir,
+		baseURL:   baseURL,
 	}
 }
 
@@ -189,11 +192,12 @@ func (s *MapSnapshotter) generateOnce() error {
 // freqMHz is the imported node's radio frequency (0 for live nodes, which the
 // client bands via their network membership instead). flags carries the
 // Flagger's quality tags for live nodes; imported nodes are never flagged.
-func (s *MapSnapshotter) collectNodes() [][10]any {
+func (s *MapSnapshotter) collectNodes() [][11]any {
 	imported := s.imported.Records()
+	observers := s.observerNodes()
 
 	s.nodes.mu.Lock()
-	out := make([][10]any, 0, len(s.nodes.nodes)+len(imported))
+	out := make([][11]any, 0, len(s.nodes.nodes)+len(imported))
 	seen := make(map[string]bool, len(s.nodes.nodes))
 	for _, n := range s.nodes.nodes {
 		if !n.HasGPS || !validCoords(n.Lat, n.Lon) {
@@ -216,7 +220,7 @@ func (s *MapSnapshotter) collectNodes() [][10]any {
 		if flags == nil {
 			flags = []string{}
 		}
-		out = append(out, [10]any{n.PubKey, n.Name, n.NodeType, n.Lat, n.Lon, n.LastAdvertAt, n.AdvertCount, nets, float64(0), flags})
+		out = append(out, [11]any{n.PubKey, n.Name, n.NodeType, n.Lat, n.Lon, n.LastAdvertAt, n.AdvertCount, nets, float64(0), flags, observers[n.PubKey]})
 	}
 	s.nodes.mu.Unlock()
 
@@ -224,7 +228,28 @@ func (s *MapSnapshotter) collectNodes() [][10]any {
 		if seen[n.PublicKey] || !n.hasCoords() {
 			continue
 		}
-		out = append(out, [10]any{n.PublicKey, n.AdvName, byte(n.Type), n.AdvLat, n.AdvLon, n.lastAdvertUnix(), uint64(0), []string{}, n.frequencyMHz(), []string{}})
+		out = append(out, [11]any{n.PublicKey, n.AdvName, byte(n.Type), n.AdvLat, n.AdvLon, n.lastAdvertUnix(), uint64(0), []string{}, n.frequencyMHz(), []string{}, observers[n.PublicKey]})
+	}
+	return out
+}
+
+func (s *MapSnapshotter) observerNodes() map[string]*NodeObserverView {
+	out := map[string]*NodeObserverView{}
+	if s.observers == nil {
+		return out
+	}
+	for _, obs := range s.observers.Snapshot() {
+		if _, ok := normalizePub(obs.ObserverID); !ok {
+			continue
+		}
+		out[obs.ObserverID] = &NodeObserverView{
+			ObserverID:   obs.ObserverID,
+			Name:         obs.Name,
+			FirstSeen:    obs.FirstSeen,
+			LastSeen:     obs.LastSeen,
+			Observations: obs.Observations,
+			Networks:     obs.Networks,
+		}
 	}
 	return out
 }

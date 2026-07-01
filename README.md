@@ -76,6 +76,8 @@ resolved path (`A→B→C` yields `A—B` and `B—C`). Links are aggregated glo
 deduplicated by `(packet hash, link)` across observers and networks, with a 24h
 half-life activity score so recent traffic dominates. Each link (served by
 `GET /api/nodes/{pubkey}/links`) carries diagnostic context beyond the bare count:
+If the packet observer id is itself a full node public key, it is appended as the
+final receiving hop before links are recorded.
 
 - **Direction** — `sentByNode` / `recvByNode` split the counted packets by which
   way they travelled relative to the queried node (path order = propagation
@@ -93,13 +95,14 @@ half-life activity score so recent traffic dominates. Each link (served by
   **direct** paths are pre-computed routes the sender declared, so a link seen
   only via `direct` may never have been a real RF hop. This is the primary lens
   for spotting unrealistic connections.
-- **Last packet hash** — `lastHash` is the content hash of the most recent packet
-  counted in the queried node -> neighbor direction, so a suspicious directional
-  link traces back to a concrete packet.
+- **Last packet hash** — `lastHashSentByNode` and `lastHashRecvByNode` are the
+  content hashes of the most recent packets counted in each direction, so a
+  suspicious directional link traces back to a concrete packet.
 - **SNR** — for `TRACE` packets (which accumulate a received-SNR byte per hop),
-  the per-hop SNR is attributed to each link direction best-effort. `snrs` keeps
-  the last 5 SNRs for the queried node -> neighbor direction, and `lastSnr` is
-  the newest value from that same directional history.
+  the per-hop SNR is attributed to each link direction best-effort.
+  `snrsSentByNode` / `snrsRecvByNode` keep the last 5 SNRs per direction, and
+  `lastSnrSentByNode` / `lastSnrRecvByNode` are the newest values from those
+  directional histories.
 
 The route type comes from the packet header (`raw_hex`); TRACE SNRs from the
 `meshpkt` TRACE decoder. All of the above persist to `links.db` and are restored

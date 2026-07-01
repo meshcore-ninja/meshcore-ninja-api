@@ -2,6 +2,7 @@ package main
 
 import (
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -100,6 +101,30 @@ func (r *ObserverRegistry) Snapshot() []ObserverView {
 		return out[i].ObserverID < out[j].ObserverID
 	})
 	return out
+}
+
+func (r *ObserverRegistry) Lookup(observerID string) (ObserverView, bool) {
+	observerID = strings.TrimSpace(observerID)
+	if observerID == "" {
+		return ObserverView{}, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	o := r.observers[observerID]
+	if o == nil {
+		o = r.observers[strings.ToLower(observerID)]
+	}
+	if o == nil {
+		return ObserverView{}, false
+	}
+	return ObserverView{
+		ObserverID:   o.ObserverID,
+		Name:         o.Name,
+		FirstSeen:    o.FirstSeen,
+		LastSeen:     o.LastSeen,
+		Observations: o.Observations,
+		Networks:     append([]string(nil), o.Networks...),
+	}, true
 }
 
 // Export captures every observer row for persistence, deep-copying slices so

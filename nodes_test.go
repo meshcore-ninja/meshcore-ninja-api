@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/hex"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/meshcore-cz/meshpkt"
@@ -99,6 +101,42 @@ func TestCollectAdvert(t *testing.T) {
 	feedPacket(c, wsPacket{Hash: "h2", RawHex: "deadbeef", PayloadType: &txt})
 	if nodes := reg.Snapshot(); len(nodes) != 1 {
 		t.Errorf("after non-advert: nodes = %d, want 1", len(nodes))
+	}
+}
+
+func TestNodeDetailMarksObserverNode(t *testing.T) {
+	pub := pk(0xab)
+	nodes := newNodeRegistry(defaultAdvertsPerNode)
+	nodes.nodes[pub] = &NodeRecord{
+		PubKey:       pub,
+		Name:         "Observer Node",
+		NodeType:     2,
+		HasGPS:       true,
+		Lat:          50.1,
+		Lon:          14.4,
+		LastAdvertAt: 100,
+		AdvertCount:  1,
+		Networks:     []string{"mesh"},
+	}
+	observers := newObserverRegistry()
+	observers.Observe(ObserverActivity{ObserverID: pub, Name: "Observer One", NetworkID: "mesh", At: 200})
+	srv := NewServer(NewStore(nil), nodes, observers, newLinkRegistry(defaultLinkHalfLife), newImportRegistry(), nil, nil, nil, nil, nil, "*")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/nodes/"+pub, nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var view NodeView
+	if err := json.Unmarshal(rr.Body.Bytes(), &view); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !view.IsObserver || view.Observer == nil {
+		t.Fatalf("observer marker missing: %+v", view)
+	}
+	if view.Observer.ObserverID != pub || view.Observer.Name != "Observer One" || view.Observer.Observations != 1 {
+		t.Errorf("observer = %+v, want id/name/count", view.Observer)
 	}
 }
 
