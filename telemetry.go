@@ -43,6 +43,7 @@ type Metrics struct {
 	// --- persistence (SQLite flush loop) ---
 	dbFlushDuration *prometheus.HistogramVec // op
 	dbFlushErrors   *prometheus.CounterVec   // op
+	dbFlushItems    *prometheus.GaugeVec     // op
 	dbRowsWritten   *prometheus.CounterVec   // op
 	registryNodes   *prometheus.GaugeVec     // source
 	sqliteRows      *prometheus.GaugeVec     // table
@@ -114,6 +115,11 @@ func NewMetrics() *Metrics {
 	m.dbFlushErrors = factory.NewCounterVec(prometheus.CounterOpts{
 		Name: "meshcore_db_flush_errors_total",
 		Help: "SQLite persistence flush errors, by operation.",
+	}, []string{"op"})
+
+	m.dbFlushItems = factory.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "meshcore_db_flush_items",
+		Help: "Items included in the most recent SQLite persistence flush attempt, by operation.",
 	}, []string{"op"})
 
 	m.dbRowsWritten = factory.NewCounterVec(prometheus.CounterOpts{
@@ -232,6 +238,7 @@ func (m *Metrics) observeDBFlush(op string, rows int, dur time.Duration, err err
 	if m == nil {
 		return
 	}
+	m.dbFlushItems.WithLabelValues(op).Set(float64(rows))
 	m.dbFlushDuration.WithLabelValues(op).Observe(dur.Seconds())
 	if err != nil {
 		m.dbFlushErrors.WithLabelValues(op).Inc()

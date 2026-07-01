@@ -291,6 +291,7 @@ Service metrics:
 | `meshcore_analyzer_last_packet_timestamp_seconds` | gauge | `network`, `analyzer` | unix time of the last packet from the analyzer |
 | `meshcore_db_flush_duration_seconds` | histogram | `op` | SQLite flush latency (`counters`, `nodes`, `adverts`, `links`, `observers`) |
 | `meshcore_db_flush_errors_total` | counter | `op` | SQLite flush errors |
+| `meshcore_db_flush_items` | gauge | `op` | items included in the most recent SQLite flush attempt |
 | `meshcore_db_rows_written_total` | counter | `op` | rows written to SQLite |
 | `meshcore_registry_nodes_current` | gauge | `source` | current in-memory node counts (`live`, `imported`) |
 | `meshcore_sqlite_rows` | gauge | `table` | current SQLite row counts for fixed persistence tables (`nodes`, `imported_nodes`, `adverts`, `imported_node_history`) |
