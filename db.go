@@ -196,11 +196,14 @@ func OpenDB(path, linksPath string) (*DB, error) {
 		return nil, fmt.Errorf("init link schema: %w", err)
 	}
 	for _, m := range []struct{ col, decl string }{
-		{"last_hash", "TEXT NOT NULL DEFAULT ''"},
+		{"last_hash_ab", "TEXT NOT NULL DEFAULT ''"},
+		{"last_hash_ba", "TEXT NOT NULL DEFAULT ''"},
 		{"dir_ab", "INTEGER NOT NULL DEFAULT 0"},
 		{"dir_ba", "INTEGER NOT NULL DEFAULT 0"},
 		{"last_snr", "REAL NOT NULL DEFAULT 0"},
 		{"has_snr", "INTEGER NOT NULL DEFAULT 0"},
+		{"snrs_ab", "TEXT NOT NULL DEFAULT '[]'"},
+		{"snrs_ba", "TEXT NOT NULL DEFAULT '[]'"},
 		{"geo", "TEXT NOT NULL DEFAULT ''"},
 		{"sources", "TEXT NOT NULL DEFAULT '{}'"},
 	} {
@@ -209,6 +212,11 @@ func OpenDB(path, linksPath string) (*DB, error) {
 			_ = linksDB.Close()
 			return nil, fmt.Errorf("migrate links.%s: %w", m.col, err)
 		}
+	}
+	if err := dropColumnIfExists(linksDB, "links", "last_hash"); err != nil {
+		_ = sdb.Close()
+		_ = linksDB.Close()
+		return nil, fmt.Errorf("migrate links.last_hash: %w", err)
 	}
 	d := &DB{db: sdb, links: linksDB}
 	if err := d.initStats(); err != nil {
@@ -255,9 +263,33 @@ func (d *DB) initStats() error {
 }
 
 func ensureColumn(db *sql.DB, table, column, decl string) error {
-	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	ok, err := columnExists(db, table, column)
 	if err != nil {
 		return err
+	}
+	if ok {
+		return nil
+	}
+	_, err = db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + decl)
+	return err
+}
+
+func dropColumnIfExists(db *sql.DB, table, column string) error {
+	ok, err := columnExists(db, table, column)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	_, err = db.Exec(`ALTER TABLE ` + table + ` DROP COLUMN ` + column)
+	return err
+}
+
+func columnExists(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false, err
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -270,17 +302,16 @@ func ensureColumn(db *sql.DB, table, column, decl string) error {
 			pk         int
 		)
 		if err := rows.Scan(&cid, &name, &colType, &notNull, &defaultVal, &pk); err != nil {
-			return err
+			return false, err
 		}
 		if name == column {
-			return nil
+			return true, nil
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return false, err
 	}
-	_, err = db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + decl)
-	return err
+	return false, nil
 }
 
 // Stats returns cached durable table sizes. It does not query SQLite, so it is
@@ -435,6 +466,14 @@ func marshalLinkSources(m map[string]uint64) string {
 	return string(b)
 }
 
+func marshalLinkSNRs(vals []float64) string {
+	if len(vals) == 0 {
+		return "[]"
+	}
+	b, _ := json.Marshal(vals)
+	return string(b)
+}
+
 // marshalFlags serializes a node's flag list as a JSON array, normalizing the
 // empty/nil case to "[]" so the NOT NULL column never stores "null".
 func marshalFlags(flags []string) string {
@@ -582,19 +621,20 @@ func (d *DB) SaveLinks(records []LinkRecord, now int64) error {
 	defer tx.Rollback()
 
 	linkStmt, err := tx.Prepare(`
-		INSERT INTO links (node_a, node_b, packet_count, first_seen, last_seen, activity_score, score_updated_at, last_hash, dir_ab, dir_ba, last_snr, has_snr, geo, sources)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO links (node_a, node_b, packet_count, first_seen, last_seen, activity_score, score_updated_at, last_hash_ab, last_hash_ba, dir_ab, dir_ba, snrs_ab, snrs_ba, geo, sources)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(node_a, node_b) DO UPDATE SET
 			packet_count     = excluded.packet_count,
 			first_seen       = MIN(links.first_seen, excluded.first_seen),
 			last_seen        = MAX(links.last_seen, excluded.last_seen),
 			activity_score   = excluded.activity_score,
 			score_updated_at = excluded.score_updated_at,
-			last_hash        = excluded.last_hash,
+			last_hash_ab     = excluded.last_hash_ab,
+			last_hash_ba     = excluded.last_hash_ba,
 			dir_ab           = excluded.dir_ab,
 			dir_ba           = excluded.dir_ba,
-			last_snr         = excluded.last_snr,
-			has_snr          = excluded.has_snr,
+			snrs_ab          = excluded.snrs_ab,
+			snrs_ba          = excluded.snrs_ba,
 			geo              = excluded.geo,
 			sources          = excluded.sources`)
 	if err != nil {
@@ -615,7 +655,7 @@ func (d *DB) SaveLinks(records []LinkRecord, now int64) error {
 
 	for _, rec := range records {
 		if _, err := linkStmt.Exec(rec.NodeA, rec.NodeB, rec.PacketCount, rec.FirstSeen, rec.LastSeen, rec.Score, rec.ScoreUpdatedAt,
-			rec.LastHash, rec.DirAB, rec.DirBA, rec.LastSNR, b2i(rec.HasSNR), marshalLinkGeo(rec), marshalLinkSources(rec.SourceCounts)); err != nil {
+			rec.LastHashAB, rec.LastHashBA, rec.DirAB, rec.DirBA, marshalLinkSNRs(rec.SNRsAB), marshalLinkSNRs(rec.SNRsBA), marshalLinkGeo(rec), marshalLinkSources(rec.SourceCounts)); err != nil {
 			return err
 		}
 		for _, n := range rec.Networks {
@@ -630,7 +670,7 @@ func (d *DB) SaveLinks(records []LinkRecord, now int64) error {
 // LoadLinks reads every persisted link aggregate plus its network associations
 // back into memory at startup.
 func (d *DB) LoadLinks() ([]LinkRecord, error) {
-	rows, err := d.links.Query(`SELECT node_a, node_b, packet_count, first_seen, last_seen, activity_score, score_updated_at, last_hash, dir_ab, dir_ba, last_snr, has_snr, geo, sources FROM links`)
+	rows, err := d.links.Query(`SELECT node_a, node_b, packet_count, first_seen, last_seen, activity_score, score_updated_at, last_hash_ab, last_hash_ba, dir_ab, dir_ba, snrs_ab, snrs_ba, geo, sources FROM links`)
 	if err != nil {
 		return nil, err
 	}
@@ -641,15 +681,17 @@ func (d *DB) LoadLinks() ([]LinkRecord, error) {
 	for rows.Next() {
 		var (
 			rec     LinkRecord
-			hasSNR  int
 			geo     string
 			sources string
+			snrsAB  string
+			snrsBA  string
 		)
 		if err := rows.Scan(&rec.NodeA, &rec.NodeB, &rec.PacketCount, &rec.FirstSeen, &rec.LastSeen, &rec.Score, &rec.ScoreUpdatedAt,
-			&rec.LastHash, &rec.DirAB, &rec.DirBA, &rec.LastSNR, &hasSNR, &geo, &sources); err != nil {
+			&rec.LastHashAB, &rec.LastHashBA, &rec.DirAB, &rec.DirBA, &snrsAB, &snrsBA, &geo, &sources); err != nil {
 			return nil, err
 		}
-		rec.HasSNR = hasSNR != 0
+		_ = json.Unmarshal([]byte(snrsAB), &rec.SNRsAB)
+		_ = json.Unmarshal([]byte(snrsBA), &rec.SNRsBA)
 		applyLinkGeo(&rec, geo)
 		if sources != "" {
 			_ = json.Unmarshal([]byte(sources), &rec.SourceCounts)

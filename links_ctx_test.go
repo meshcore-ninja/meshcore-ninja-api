@@ -21,8 +21,8 @@ func TestLinkDirectionAndSources(t *testing.T) {
 	if la.PacketCount != 2 {
 		t.Errorf("packetCount = %d, want 2", la.PacketCount)
 	}
-	if la.LastHash != "h2" {
-		t.Errorf("lastHash = %q, want h2", la.LastHash)
+	if la.LastHash != "h1" {
+		t.Errorf("from A lastHash = %q, want h1", la.LastHash)
 	}
 	if la.Sources["flood"] != 1 || la.Sources["direct"] != 1 {
 		t.Errorf("sources = %v, want flood:1 direct:1", la.Sources)
@@ -32,6 +32,9 @@ func TestLinkDirectionAndSources(t *testing.T) {
 	lb := mustNeighbor(t, reg, b, a)
 	if lb.SentByNode != 1 || lb.RecvByNode != 1 {
 		t.Errorf("from B: sent=%d recv=%d, want 1/1", lb.SentByNode, lb.RecvByNode)
+	}
+	if lb.LastHash != "h2" {
+		t.Errorf("from B lastHash = %q, want h2", lb.LastHash)
 	}
 }
 
@@ -79,6 +82,32 @@ func TestLinkSNRAttribution(t *testing.T) {
 	bc := mustNeighbor(t, reg, b, c)
 	if !bc.HasSNR || bc.LastSNR != -3.0 {
 		t.Errorf("B—C snr: has=%v val=%.2f, want true/-3.00", bc.HasSNR, bc.LastSNR)
+	}
+}
+
+func TestLinkSNRHistoryIsDirectionalAndCapped(t *testing.T) {
+	a, b := pk(1), pk(2) // pk(1) < pk(2): canonical NodeA=a, NodeB=b
+	reg := noDecay()
+
+	for i := 1; i <= 6; i++ {
+		reg.ObservePathCtx(PathObservation{
+			Hash: string(rune('a' + i)), Path: []string{a, b}, RouteType: "direct",
+			SNRs: []float64{float64(i)}, Now: int64(100 + i),
+		})
+	}
+	reg.ObservePathCtx(PathObservation{Hash: "r1", Path: []string{b, a}, SNRs: []float64{-1.5}, Now: 200})
+	reg.ObservePathCtx(PathObservation{Hash: "r2", Path: []string{b, a}, SNRs: []float64{-2.5}, Now: 201})
+
+	fromA := mustNeighbor(t, reg, a, b)
+	wantA := []float64{2, 3, 4, 5, 6}
+	if !equalFloatSlices(fromA.SNRs, wantA) || !fromA.HasSNR || fromA.LastSNR != 6 {
+		t.Errorf("A->B snrs=%v has=%v last=%.2f, want %v true/6", fromA.SNRs, fromA.HasSNR, fromA.LastSNR, wantA)
+	}
+
+	fromB := mustNeighbor(t, reg, b, a)
+	wantB := []float64{-1.5, -2.5}
+	if !equalFloatSlices(fromB.SNRs, wantB) || !fromB.HasSNR || fromB.LastSNR != -2.5 {
+		t.Errorf("B->A snrs=%v has=%v last=%.2f, want %v true/-2.5", fromB.SNRs, fromB.HasSNR, fromB.LastSNR, wantB)
 	}
 }
 
@@ -145,7 +174,7 @@ func TestLinkPersistenceRoundTrip(t *testing.T) {
 	src := noDecay()
 	src.ObservePathCtx(PathObservation{Hash: "h1", NetworkID: "net", RouteType: "flood", Path: []string{a, b}, SNRs: []float64{9.5}, Now: 100, PosOf: posOf})
 	pos[b] = [2]float64{60, 20}
-	src.ObservePathCtx(PathObservation{Hash: "h2", NetworkID: "net", RouteType: "direct", Path: []string{b, a}, Now: 200, PosOf: posOf})
+	src.ObservePathCtx(PathObservation{Hash: "h2", NetworkID: "net", RouteType: "direct", Path: []string{b, a}, SNRs: []float64{-4.5}, Now: 200, PosOf: posOf})
 
 	dirty := src.TakeDirty()
 	if err := db.SaveLinks(dirty, 200); err != nil {
@@ -169,10 +198,28 @@ func TestLinkPersistenceRoundTrip(t *testing.T) {
 	if l.Sources["flood"] != 1 || l.Sources["direct"] != 1 {
 		t.Errorf("sources = %v, want flood:1 direct:1", l.Sources)
 	}
-	if !l.HasSNR || l.LastSNR != 9.5 {
-		t.Errorf("snr has=%v val=%.2f, want true/9.50", l.HasSNR, l.LastSNR)
+	if l.LastHash != "h1" {
+		t.Errorf("A->B lastHash = %q, want h1", l.LastHash)
+	}
+	if !l.HasSNR || l.LastSNR != 9.5 || !equalFloatSlices(l.SNRs, []float64{9.5}) {
+		t.Errorf("A->B snr has=%v val=%.2f history=%v, want true/9.50/[9.5]", l.HasSNR, l.LastSNR, l.SNRs)
+	}
+	if rev := mustNeighbor(t, dst, b, a); rev.LastHash != "h2" || !rev.HasSNR || rev.LastSNR != -4.5 || !equalFloatSlices(rev.SNRs, []float64{-4.5}) {
+		t.Errorf("B->A hash=%q snr has=%v val=%.2f history=%v, want h2 true/-4.50/[-4.5]", rev.LastHash, rev.HasSNR, rev.LastSNR, rev.SNRs)
 	}
 	if !l.Moved || l.SegmentCount != 1 {
 		t.Errorf("geometry moved=%v segs=%d, want true/1", l.Moved, l.SegmentCount)
 	}
+}
+
+func equalFloatSlices(a, b []float64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

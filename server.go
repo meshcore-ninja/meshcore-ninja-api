@@ -440,8 +440,9 @@ type linkView struct {
 	// vs received from this neighbor. Exposes asymmetric (one-way) links.
 	SentByNode uint64            `json:"sentByNode"`
 	RecvByNode uint64            `json:"recvByNode"`
-	LastHash   string            `json:"lastHash,omitempty"` // content hash of the most recent packet on this link
+	LastHash   string            `json:"lastHash,omitempty"` // most recent packet hash for selected node->neighbor
 	LastSNR    *float64          `json:"lastSnr,omitempty"`  // best-effort per-hop SNR (dB) from a TRACE, if any
+	SNRs       []float64         `json:"snrs,omitempty"`     // last SNRs for the selected node->neighbor direction
 	Sources    map[string]uint64 `json:"sources,omitempty"`  // counted events by route type (flood/direct/…)
 	Geometry   *linkGeometryView `json:"geometry,omitempty"` // endpoint positions at observation, if known
 }
@@ -1206,6 +1207,7 @@ func (s *Server) handleNodeLinks(w http.ResponseWriter, r *http.Request, rawPub 
 		if l.HasSNR {
 			snr := round2(l.LastSNR)
 			v.LastSNR = &snr
+			v.SNRs = roundFloatSlice(l.SNRs)
 		}
 		if l.HasPos {
 			v.Geometry = &linkGeometryView{
@@ -1416,4 +1418,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"analyzersConnected": connected,
 		"time":               now,
 	})
+}
+
+func roundFloatSlice(vals []float64) []float64 {
+	if len(vals) == 0 {
+		return nil
+	}
+	out := make([]float64, len(vals))
+	for i, v := range vals {
+		out[i] = round2(v)
+	}
+	return out
 }

@@ -195,7 +195,7 @@ func TestLinkRestoreMergesLiveUpdates(t *testing.T) {
 	}
 
 	reg := noDecay()
-	reg.ObservePath("live", "net-live", []string{a, b}, 200)
+	reg.ObservePathCtx(PathObservation{Hash: "live", NetworkID: "net-live", Path: []string{a, b}, SNRs: []float64{9}, Now: 200})
 	reg.Restore([]LinkRecord{{
 		NodeA:          key.nodeA(),
 		NodeB:          key.nodeB(),
@@ -205,6 +205,7 @@ func TestLinkRestoreMergesLiveUpdates(t *testing.T) {
 		Score:          3,
 		ScoreUpdatedAt: 150,
 		Networks:       []linkNetwork{{NetworkID: "net-old", FirstSeen: 100, LastSeen: 150}},
+		SNRsAB:         []float64{1, 2},
 	}})
 
 	ab := mustNeighbor(t, reg, a, b)
@@ -216,6 +217,9 @@ func TestLinkRestoreMergesLiveUpdates(t *testing.T) {
 	}
 	if len(ab.Networks) != 2 {
 		t.Errorf("merged networks = %v, want old and live", ab.Networks)
+	}
+	if !equalFloatSlices(ab.SNRs, []float64{1, 2, 9}) || ab.LastSNR != 9 {
+		t.Errorf("merged snrs = %v last=%.2f, want [1 2 9]/9", ab.SNRs, ab.LastSNR)
 	}
 }
 
@@ -368,6 +372,39 @@ func TestNodeLinksEndpoint(t *testing.T) {
 	// Network filter must not change the global packet count.
 	if resp.Links[0].PacketCount != 3 {
 		t.Errorf("filtered A—C packetCount = %d, want 3 (unchanged by filter)", resp.Links[0].PacketCount)
+	}
+}
+
+func TestNodeLinksEndpointReturnsDirectionalSNRHistory(t *testing.T) {
+	a, b := pk(0xa1), pk(0xb1)
+	reg := noDecay()
+	reg.ObservePathCtx(PathObservation{Hash: "h1", Path: []string{a, b}, SNRs: []float64{1.234}, Now: 1000})
+	reg.ObservePathCtx(PathObservation{Hash: "h2", Path: []string{a, b}, SNRs: []float64{2.345}, Now: 1001})
+	reg.ObservePathCtx(PathObservation{Hash: "h3", Path: []string{b, a}, SNRs: []float64{-7.891}, Now: 1002})
+
+	nodes := newNodeRegistry(defaultAdvertsPerNode)
+	srv := NewServer(NewStore(nil), nodes, newObserverRegistry(), reg, newImportRegistry(), nil, nil, nil, nil, nil, "*")
+
+	fromA := getLinks(t, srv, a, "")
+	if len(fromA.Links) != 1 {
+		t.Fatalf("from A links = %d, want 1", len(fromA.Links))
+	}
+	if fromA.Links[0].LastSNR == nil || *fromA.Links[0].LastSNR != 2.35 || !equalFloatSlices(fromA.Links[0].SNRs, []float64{1.23, 2.35}) {
+		t.Errorf("from A lastSnr=%v snrs=%v, want 2.35/[1.23 2.35]", fromA.Links[0].LastSNR, fromA.Links[0].SNRs)
+	}
+	if fromA.Links[0].LastHash != "h2" {
+		t.Errorf("from A lastHash=%q, want h2", fromA.Links[0].LastHash)
+	}
+
+	fromB := getLinks(t, srv, b, "")
+	if len(fromB.Links) != 1 {
+		t.Fatalf("from B links = %d, want 1", len(fromB.Links))
+	}
+	if fromB.Links[0].LastSNR == nil || *fromB.Links[0].LastSNR != -7.88 || !equalFloatSlices(fromB.Links[0].SNRs, []float64{-7.88}) {
+		t.Errorf("from B lastSnr=%v snrs=%v, want -7.88/[-7.88]", fromB.Links[0].LastSNR, fromB.Links[0].SNRs)
+	}
+	if fromB.Links[0].LastHash != "h3" {
+		t.Errorf("from B lastHash=%q, want h3", fromB.Links[0].LastHash)
 	}
 }
 

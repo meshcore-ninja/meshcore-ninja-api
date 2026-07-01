@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 )
@@ -47,6 +48,39 @@ func TestSaveLoadNodes(t *testing.T) {
 	got, _ = db.LoadNodes()
 	if len(got) != 1 || got[0].Name != "Repeater v2" || got[0].AdvertCount != 6 {
 		t.Errorf("after upsert: %+v, want one row name=Repeater v2 count=6", got)
+	}
+}
+
+func TestOpenDBDropsLegacyLastHashColumn(t *testing.T) {
+	dir := t.TempDir()
+	corePath := filepath.Join(dir, "core.db")
+	linksPath := filepath.Join(dir, "links.db")
+
+	legacy, err := sql.Open("sqlite", "file:"+linksPath)
+	if err != nil {
+		t.Fatalf("open legacy links db: %v", err)
+	}
+	if _, err := legacy.Exec(linkSchema); err != nil {
+		t.Fatalf("legacy link schema: %v", err)
+	}
+	if err := ensureColumn(legacy, "links", "last_hash", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		t.Fatalf("add legacy last_hash: %v", err)
+	}
+	if ok, err := columnExists(legacy, "links", "last_hash"); err != nil || !ok {
+		t.Fatalf("legacy last_hash exists = %v, err=%v; want true/nil", ok, err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close legacy links db: %v", err)
+	}
+
+	db, err := OpenDB(corePath, linksPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer db.Close()
+
+	if ok, err := columnExists(db.links, "links", "last_hash"); err != nil || ok {
+		t.Fatalf("last_hash exists after migration = %v, err=%v; want false/nil", ok, err)
 	}
 }
 

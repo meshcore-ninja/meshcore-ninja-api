@@ -27,6 +27,8 @@ const defaultLinkHalfLife = 24 * 60 * 60
 // the registry concurrently, so the keyspace is split to keep lock contention low.
 const linkShards = 64
 
+const linkSNRHistoryLimit = 5
+
 // pubKey is a node's 32-byte Ed25519 public key in raw (decoded) form.
 type pubKey [32]byte
 
@@ -108,18 +110,23 @@ type LinkRecord struct {
 	ScoreUpdatedAt int64
 	Networks       []linkNetwork // networks this link was observed through
 
-	// LastHash is the content hash of the most recent packet counted on this link,
-	// so a suspicious link can be traced back to a concrete source packet.
-	LastHash string
 	// Directional counts: DirAB is events seen travelling canonical NodeA→NodeB
 	// (i.e. B received the packet from A), DirBA the reverse. They sum to
 	// PacketCount and expose asymmetric links (who relays to whom).
 	DirAB uint64
 	DirBA uint64
-	// LastSNR is the most recent per-hop SNR (dB) attributed to this link from a
-	// TRACE packet's SNR accumulator; best-effort, valid only when HasSNR.
-	LastSNR float64
-	HasSNR  bool
+	// LastHashAB / LastHashBA are the most recent packet hashes counted in each
+	// canonical direction, so a suspicious directional link can be traced back to
+	// a concrete source packet.
+	LastHashAB string
+	LastHashBA string
+	// Per-direction SNR history (dB), best-effort from a TRACE packet's per-hop
+	// accumulator. SNR is measured at the receiving end, so it is inherently
+	// directional: SNRsAB is what NodeB heard when receiving from NodeA (A->B),
+	// SNRsBA what NodeA heard from NodeB. Each slice keeps the last few values in
+	// observation order.
+	SNRsAB []float64
+	SNRsBA []float64
 	// SourceCounts breaks the counted events down by route type
 	// ("flood", "direct", "transport_flood", "transport_direct", "unknown"), for
 	// diagnosing which packet kinds a link's adjacency actually came from —
@@ -371,11 +378,18 @@ func (r *LinkRegistry) observeLink(o linkObs) {
 	rec.LastSeen = o.now
 	rec.decayScore(o.now, r.halfLife)
 	rec.Score++
-	rec.LastHash = o.hash
 	if o.fromIsA {
 		rec.DirAB++
+		rec.LastHashAB = o.hash
+		if o.hasSNR {
+			rec.SNRsAB = appendCappedFloat(rec.SNRsAB, o.snr, linkSNRHistoryLimit)
+		}
 	} else {
 		rec.DirBA++
+		rec.LastHashBA = o.hash
+		if o.hasSNR {
+			rec.SNRsBA = appendCappedFloat(rec.SNRsBA, o.snr, linkSNRHistoryLimit)
+		}
 	}
 	rt := o.routeType
 	if rt == "" {
@@ -385,10 +399,6 @@ func (r *LinkRegistry) observeLink(o linkObs) {
 		rec.SourceCounts = make(map[string]uint64, 2)
 	}
 	rec.SourceCounts[rt]++
-	if o.hasSNR {
-		rec.LastSNR = o.snr
-		rec.HasSNR = true
-	}
 	rec.dirty = true
 }
 
@@ -489,9 +499,10 @@ type LinkNeighbor struct {
 	// (neighbor→node). They sum to PacketCount.
 	SentByNode uint64
 	RecvByNode uint64
-	LastHash   string  // content hash of the most recent counted packet
+	LastHash   string  // content hash of the most recent node->neighbor packet
 	LastSNR    float64 // best-effort per-hop SNR (dB), valid when HasSNR
 	HasSNR     bool
+	SNRs       []float64         // last SNRs for node->neighbor direction, oldest first
 	Sources    map[string]uint64 // counted events by route type
 
 	// Geometry from the current position segment, in the selected node's frame.
@@ -538,9 +549,6 @@ func (r *LinkRegistry) LinksForNode(node pubKey, now int64) []LinkNeighbor {
 				FirstSeen:      rec.FirstSeen,
 				LastSeen:       rec.LastSeen,
 				Networks:       nets,
-				LastHash:       rec.LastHash,
-				LastSNR:        rec.LastSNR,
-				HasSNR:         rec.HasSNR,
 				Sources:        copyCounts(rec.SourceCounts),
 				HasPos:         rec.HasPos,
 				Moved:          len(rec.Segments) > 0,
@@ -548,10 +556,18 @@ func (r *LinkRegistry) LinksForNode(node pubKey, now int64) []LinkNeighbor {
 			}
 			if nodeIsA {
 				ln.SentByNode, ln.RecvByNode = rec.DirAB, rec.DirBA
+				ln.LastHash = rec.LastHashAB
+				ln.SNRs = append([]float64(nil), rec.SNRsAB...)
 				ln.NodeLat, ln.NodeLon, ln.NeighborLat, ln.NeighborLon = rec.LatA, rec.LonA, rec.LatB, rec.LonB
 			} else {
 				ln.SentByNode, ln.RecvByNode = rec.DirBA, rec.DirAB
+				ln.LastHash = rec.LastHashBA
+				ln.SNRs = append([]float64(nil), rec.SNRsBA...)
 				ln.NodeLat, ln.NodeLon, ln.NeighborLat, ln.NeighborLon = rec.LatB, rec.LonB, rec.LatA, rec.LonA
+			}
+			if len(ln.SNRs) > 0 {
+				ln.LastSNR = ln.SNRs[len(ln.SNRs)-1]
+				ln.HasSNR = true
 			}
 			out = append(out, ln)
 		}
@@ -578,6 +594,8 @@ func (r *LinkRegistry) TakeDirty() []LinkRecord {
 			cp := *rec
 			cp.Networks = append([]linkNetwork(nil), rec.Networks...)
 			cp.Segments = append([]linkPosSegment(nil), rec.Segments...)
+			cp.SNRsAB = append([]float64(nil), rec.SNRsAB...)
+			cp.SNRsBA = append([]float64(nil), rec.SNRsBA...)
 			cp.SourceCounts = copyCounts(rec.SourceCounts)
 			out = append(out, cp)
 			rec.dirty = false
@@ -647,15 +665,17 @@ func mergeRestoredLink(existing, restored *LinkRecord, halfLife float64) {
 	for _, n := range restored.Networks {
 		existing.mergeNetwork(n)
 	}
-	// Prefer whichever side saw the most recent packet for the "last" attributes.
 	if restored.LastSeen >= existingLast {
-		if restored.LastHash != "" {
-			existing.LastHash = restored.LastHash
+		if restored.LastHashAB != "" {
+			existing.LastHashAB = restored.LastHashAB
 		}
-		if restored.HasSNR {
-			existing.LastSNR, existing.HasSNR = restored.LastSNR, true
+		if restored.LastHashBA != "" {
+			existing.LastHashBA = restored.LastHashBA
 		}
 	}
+	restoredNewer := restored.LastSeen >= existingLast
+	existing.SNRsAB = mergeSNRHistory(existing.SNRsAB, restored.SNRsAB, restoredNewer)
+	existing.SNRsBA = mergeSNRHistory(existing.SNRsBA, restored.SNRsBA, restoredNewer)
 	if existing.SourceCounts == nil && len(restored.SourceCounts) > 0 {
 		existing.SourceCounts = make(map[string]uint64, len(restored.SourceCounts))
 	}
@@ -678,6 +698,33 @@ func mergeRestoredLink(existing, restored *LinkRecord, halfLife float64) {
 		// Drop the duplicate we just appended as history.
 		existing.Segments = existing.Segments[:len(existing.Segments)-1]
 	}
+}
+
+func appendCappedFloat(vals []float64, v float64, limit int) []float64 {
+	vals = append(vals, v)
+	if len(vals) <= limit {
+		return vals
+	}
+	return append([]float64(nil), vals[len(vals)-limit:]...)
+}
+
+func appendCappedFloats(vals []float64, add []float64, limit int) []float64 {
+	for _, v := range add {
+		vals = appendCappedFloat(vals, v, limit)
+	}
+	return vals
+}
+
+func mergeSNRHistory(existing, restored []float64, restoredNewer bool) []float64 {
+	if restoredNewer {
+		return appendCappedFloats(existing, restored, linkSNRHistoryLimit)
+	}
+	vals := append([]float64(nil), restored...)
+	vals = append(vals, existing...)
+	if len(vals) <= linkSNRHistoryLimit {
+		return vals
+	}
+	return append([]float64(nil), vals[len(vals)-linkSNRHistoryLimit:]...)
 }
 
 // copyCounts returns a shallow copy of a source-count map (nil stays nil), so

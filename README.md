@@ -94,9 +94,12 @@ half-life activity score so recent traffic dominates. Each link (served by
   only via `direct` may never have been a real RF hop. This is the primary lens
   for spotting unrealistic connections.
 - **Last packet hash** — `lastHash` is the content hash of the most recent packet
-  counted on the link, so a suspicious link traces back to a concrete packet.
+  counted in the queried node -> neighbor direction, so a suspicious directional
+  link traces back to a concrete packet.
 - **SNR** — for `TRACE` packets (which accumulate a received-SNR byte per hop),
-  the per-hop SNR is attributed to each link best-effort as `lastSnr` (dB).
+  the per-hop SNR is attributed to each link direction best-effort. `snrs` keeps
+  the last 5 SNRs for the queried node -> neighbor direction, and `lastSnr` is
+  the newest value from that same directional history.
 
 The route type comes from the packet header (`raw_hex`); TRACE SNRs from the
 `meshpkt` TRACE decoder. All of the above persist to `links.db` and are restored
