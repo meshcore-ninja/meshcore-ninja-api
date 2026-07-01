@@ -50,6 +50,34 @@ func TestSnapshotAtomicPublication(t *testing.T) {
 	}
 }
 
+// TestSnapshotExcludesLocationFlagged verifies that a node flagged with an
+// implausible location is omitted from the snapshot node set, while its clean
+// peers remain.
+func TestSnapshotExcludesLocationFlagged(t *testing.T) {
+	s, _ := newTestSnapshotter(t)
+	s.nodes.ApplyFlags(map[string][]string{"aa01": {FlagFarFromNetwork}})
+
+	nodes := s.collectNodes()
+	for _, tuple := range nodes {
+		if tuple[0] == "aa01" {
+			t.Fatalf("flagged node aa01 should be excluded from the snapshot")
+		}
+	}
+	// The other seeded GPS nodes must still be present.
+	for _, want := range []string{"aa02", "aa03", "bb01"} {
+		found := false
+		for _, tuple := range nodes {
+			if tuple[0] == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected unflagged node %s in snapshot", want)
+		}
+	}
+}
+
 // TestSnapshotManifestCorrectness checks that latest.json contains all required
 // fields with coherent values after a generateOnce.
 func TestSnapshotManifestCorrectness(t *testing.T) {

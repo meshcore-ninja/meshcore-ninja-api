@@ -23,6 +23,7 @@ type Server struct {
 	metrics     *Metrics
 	hub         *Hub
 	snapshotter *MapSnapshotter
+	flagger     *Flagger // optional; backs /api/flags metadata
 	allowOrigin string
 
 	statsMu       sync.Mutex
@@ -30,8 +31,8 @@ type Server struct {
 	statsCachedAt time.Time
 }
 
-func NewServer(store *Store, nodes *NodeRegistry, observers *ObserverRegistry, links *LinkRegistry, imported *ImportRegistry, db *DB, metrics *Metrics, hub *Hub, snapshotter *MapSnapshotter, allowOrigin string) *Server {
-	return &Server{store: store, nodes: nodes, observers: observers, links: links, imported: imported, db: db, metrics: metrics, hub: hub, snapshotter: snapshotter, allowOrigin: allowOrigin}
+func NewServer(store *Store, nodes *NodeRegistry, observers *ObserverRegistry, links *LinkRegistry, imported *ImportRegistry, db *DB, metrics *Metrics, hub *Hub, snapshotter *MapSnapshotter, flagger *Flagger, allowOrigin string) *Server {
+	return &Server{store: store, nodes: nodes, observers: observers, links: links, imported: imported, db: db, metrics: metrics, hub: hub, snapshotter: snapshotter, flagger: flagger, allowOrigin: allowOrigin}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -48,6 +49,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/search", s.instrument("/api/search", s.handleSearch))
 	mux.HandleFunc("/api/route", s.instrument("/api/route", s.handleRoute))
 	mux.HandleFunc("/api/observers", s.instrument("/api/observers", s.handleObservers))
+	mux.HandleFunc("/api/flags", s.instrument("/api/flags", s.handleFlags))
 	// Prometheus/VictoriaMetrics scrape endpoint. Left un-instrumented to avoid
 	// the scraper polluting the API latency histograms.
 	if s.metrics != nil {
@@ -1310,6 +1312,53 @@ func (s *Server) handleObservers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"observers": s.observers.Snapshot(),
 	})
+}
+
+// flaggedNodeView is one entry in the /api/flags response: the identity and
+// location a consumer needs to act on a flag, without the heavy advert history.
+type flaggedNodeView struct {
+	PubKey       string   `json:"pubkey"`
+	Name         string   `json:"name"`
+	Type         byte     `json:"type"`
+	TypeName     string   `json:"typeName"`
+	Lat          float64  `json:"lat,omitempty"`
+	Lon          float64  `json:"lon,omitempty"`
+	Networks     []string `json:"networks"`
+	Flags        []string `json:"flags"`
+	LastAdvertAt int64    `json:"lastAdvertAt"`
+}
+
+// handleFlags lists every node currently carrying a flag, newest scan first.
+//
+//	GET /api/flags
+func (s *Server) handleFlags(w http.ResponseWriter, r *http.Request) {
+	recs := s.nodes.FlaggedNodes()
+	nodes := make([]flaggedNodeView, 0, len(recs))
+	for i := range recs {
+		n := &recs[i]
+		nodes = append(nodes, flaggedNodeView{
+			PubKey:       n.PubKey,
+			Name:         n.Name,
+			Type:         n.NodeType,
+			TypeName:     nodeTypeName(n.NodeType),
+			Lat:          n.Lat,
+			Lon:          n.Lon,
+			Networks:     n.Networks,
+			Flags:        n.Flags,
+			LastAdvertAt: n.LastAdvertAt,
+		})
+	}
+	resp := map[string]any{
+		"count": len(nodes),
+		"nodes": nodes,
+	}
+	if s.flagger != nil {
+		resp["thresholdKm"] = s.flagger.ThresholdKM()
+		if last := s.flagger.LastScan(); !last.IsZero() {
+			resp["lastScanAt"] = last.UTC().Format(time.RFC3339)
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

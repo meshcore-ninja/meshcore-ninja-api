@@ -19,18 +19,20 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-const snapshotFormatVersion = 1
+const snapshotFormatVersion = 2
 
 // snapshotPayload is the full-map snapshot written to disk as a zstd-compressed
 // JSON file. Nodes is a compact array-of-arrays; each inner tuple is:
-// [pubkey, name, nodeType, lat, lon, lastAdvertAt, advertCount, networks[], freqMHz].
+// [pubkey, name, nodeType, lat, lon, lastAdvertAt, advertCount, networks[], freqMHz, flags[]].
 // advertCount=0 marks imported (map.meshcore.io) nodes that carry no network
 // membership; live nodes always have advertCount≥1. freqMHz is the imported
 // node's radio frequency (0 for live nodes, which band via their networks).
+// flags are the Flagger's quality tags (e.g. "far_from_network"), empty for
+// imported nodes which the scan does not evaluate.
 type snapshotPayload struct {
-	FormatVersion int      `json:"formatVersion"`
-	GeneratedAt   string   `json:"generatedAt"`
-	Nodes         [][9]any `json:"nodes"`
+	FormatVersion int       `json:"formatVersion"`
+	GeneratedAt   string    `json:"generatedAt"`
+	Nodes         [][10]any `json:"nodes"`
 }
 
 // SnapshotManifest is written to latest.json alongside the snapshot files and
@@ -183,25 +185,37 @@ func (s *MapSnapshotter) generateOnce() error {
 
 // collectNodes assembles the compact node tuples for the snapshot. Live nodes
 // take priority over imported ones on duplicate public keys. Tuple layout:
-// [pubkey, name, nodeType, lat, lon, lastAdvertAt, advertCount, networks[], freqMHz].
+// [pubkey, name, nodeType, lat, lon, lastAdvertAt, advertCount, networks[], freqMHz, flags[]].
 // freqMHz is the imported node's radio frequency (0 for live nodes, which the
-// client bands via their network membership instead).
-func (s *MapSnapshotter) collectNodes() [][9]any {
+// client bands via their network membership instead). flags carries the
+// Flagger's quality tags for live nodes; imported nodes are never flagged.
+func (s *MapSnapshotter) collectNodes() [][10]any {
 	imported := s.imported.Records()
 
 	s.nodes.mu.Lock()
-	out := make([][9]any, 0, len(s.nodes.nodes)+len(imported))
+	out := make([][10]any, 0, len(s.nodes.nodes)+len(imported))
 	seen := make(map[string]bool, len(s.nodes.nodes))
 	for _, n := range s.nodes.nodes {
 		if !n.HasGPS || !validCoords(n.Lat, n.Lon) {
 			continue
 		}
+		// Mark seen before any skip so a matching imported directory entry never
+		// slips back in under the same pubkey.
 		seen[n.PubKey] = true
+		// A node flagged with an implausible location is intentionally omitted: its
+		// coordinates would misplace it on the map.
+		if containsStr(n.Flags, FlagFarFromNetwork) {
+			continue
+		}
 		nets := append([]string(nil), n.Networks...)
 		if nets == nil {
 			nets = []string{}
 		}
-		out = append(out, [9]any{n.PubKey, n.Name, n.NodeType, n.Lat, n.Lon, n.LastAdvertAt, n.AdvertCount, nets, float64(0)})
+		flags := append([]string(nil), n.Flags...)
+		if flags == nil {
+			flags = []string{}
+		}
+		out = append(out, [10]any{n.PubKey, n.Name, n.NodeType, n.Lat, n.Lon, n.LastAdvertAt, n.AdvertCount, nets, float64(0), flags})
 	}
 	s.nodes.mu.Unlock()
 
@@ -209,7 +223,7 @@ func (s *MapSnapshotter) collectNodes() [][9]any {
 		if seen[n.PublicKey] || !n.hasCoords() {
 			continue
 		}
-		out = append(out, [9]any{n.PublicKey, n.AdvName, byte(n.Type), n.AdvLat, n.AdvLon, n.lastAdvertUnix(), uint64(0), []string{}, n.frequencyMHz()})
+		out = append(out, [10]any{n.PublicKey, n.AdvName, byte(n.Type), n.AdvLat, n.AdvLon, n.lastAdvertUnix(), uint64(0), []string{}, n.frequencyMHz(), []string{}})
 	}
 	return out
 }

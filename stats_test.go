@@ -49,7 +49,7 @@ func TestStatsAPIAndMetrics(t *testing.T) {
 	}
 
 	metrics := NewMetrics()
-	srv := NewServer(NewStore(nil), nodes, newObserverRegistry(), newLinkRegistry(defaultLinkHalfLife), imported, db, metrics, nil, nil, "*")
+	srv := NewServer(NewStore(nil), nodes, newObserverRegistry(), newLinkRegistry(defaultLinkHalfLife), imported, db, metrics, nil, nil, nil, "*")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
 	rr := httptest.NewRecorder()

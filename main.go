@@ -304,9 +304,28 @@ func main() {
 	snapshotter := NewMapSnapshotter(registry, imported, cfg.SnapshotDir, cfg.SnapshotBaseURL)
 	go snapshotter.Run(ctx, startupDone, cfg.SnapshotInterval.Std())
 
+	// Periodic quality flagging: scan nodes against each network's published
+	// coverage polygons and tag those whose GPS is implausibly far from every
+	// network they belong to. Disabled when no coverage source is configured.
+	var flagger *Flagger
+	if cfg.NetworkAreaURL != "" {
+		areas := NewNetworkAreas()
+		if byNet, err := LoadNetworkAreas(cfg.NetworkAreaURL); err != nil {
+			log.Printf("warning: loading network areas from %s: %v", cfg.NetworkAreaURL, err)
+		} else {
+			areas.Replace(byNet)
+			log.Printf("loaded coverage areas for %d network(s) from %s", len(byNet), cfg.NetworkAreaURL)
+		}
+		flagger = NewFlagger(registry, areas, cfg.FarFromNetworkKM)
+		if cfg.NetworkAreaInterval.Std() > 0 {
+			go refreshNetworkAreas(ctx, cfg.NetworkAreaURL, cfg.NetworkAreaInterval.Std(), areas)
+		}
+		go flagger.Run(ctx, startupDone, cfg.FlagInterval.Std())
+	}
+
 	srv := &http.Server{
 		Addr:         cfg.Addr,
-		Handler:      NewServer(store, registry, observers, links, imported, db, metrics, hub, snapshotter, cfg.AllowOrigin).Handler(),
+		Handler:      NewServer(store, registry, observers, links, imported, db, metrics, hub, snapshotter, flagger, cfg.AllowOrigin).Handler(),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 15 * time.Second,
 	}
@@ -323,6 +342,28 @@ func main() {
 		log.Fatalf("http server: %v", err)
 	}
 	log.Print("shutdown complete")
+}
+
+// refreshNetworkAreas periodically reloads the network coverage polygons so the
+// flagger tracks published boundary changes without a restart. A failed refresh
+// is logged and the previous polygon set is kept.
+func refreshNetworkAreas(ctx context.Context, url string, interval time.Duration, areas *NetworkAreas) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			byNet, err := LoadNetworkAreas(url)
+			if err != nil {
+				log.Printf("warning: refreshing network areas from %s: %v", url, err)
+				continue
+			}
+			areas.Replace(byNet)
+			log.Printf("refreshed coverage areas for %d network(s) from %s", len(byNet), url)
+		}
+	}
 }
 
 func refreshNetworks(ctx context.Context, dataURL string, interval time.Duration, store *Store, networkFilter map[string]bool, metrics *Metrics, tv *TangleveilCollector) {

@@ -209,6 +209,9 @@ sqlite3 core.db ".read /path/to/meshcore-ninja-api/scripts/migrate_links_to_link
 - `GET /api/observers` — `{observers: [observerView]}` — the global observer
   activity table, most recently active first. Each entry has `observerId`, `name`,
   `firstSeen`, `lastSeen`, `observations`, and `networks`.
+- `GET /api/flags` — `{count, thresholdKm, lastScanAt, nodes: [flaggedNode]}` —
+  every node currently carrying a quality flag, keyed by `pubkey`. See
+  [Quality flags](#quality-flags) below.
 - `GET /api/map` — a GeoJSON `FeatureCollection` for one map viewport, powering
   [map.meshcore.ninja](https://map.meshcore.ninja). It aggregates dense areas into
   **cluster** features at low zoom and returns **individual node** features when
@@ -274,6 +277,7 @@ sync completes; set `import_url = ""` to disable the mirror entirely.
   "firstAdvertAt": 1782000000, "lastAdvertAt": 1782057222,
   "advertCount": 12, "networks": ["meshcore-cz", "eu-uk-narrow"],
   "observerName": "Observer One",
+  "flags": ["far_from_network"],
   "latestAdverts": [
     {
       "name": "Repeater One", "type": 2, "typeName": "repeater",
@@ -287,7 +291,51 @@ sync completes; set `import_url = ""` to disable the mirror entirely.
 
 Each `latestAdverts` entry is one advert for that node (newest first, capped at
 10), where `advertTime` is the advert's own broadcast timestamp and `at` is when
-we received it.
+we received it. `flags` is present only when the node carries at least one
+quality flag (see below).
+
+### Quality flags
+
+A background scan runs every `flag_interval` and tags nodes whose data looks
+suspect, so the map and other consumers can style or hide them. Flags are
+recomputed from scratch each scan — a flag clears automatically once the
+condition no longer holds — and are persisted to the `nodes` table so they
+survive restarts. They surface in three places: the `flags` array on each
+`nodeView` (`/api/nodes`), the trailing element of each node tuple in the map
+snapshot, and the dedicated `/api/flags` endpoint.
+
+Current rules:
+
+| flag | meaning |
+|------|---------|
+| `far_from_network` | The node's GPS position is more than `far_from_network_km` (default 1000 km) from the published coverage area of **every** network it has been heard on. Likely a bad GPS fix, spoofed coordinates, or a misattributed advert. |
+
+A `far_from_network` node is **excluded from the map snapshot** — its
+coordinates would misplace it — but it still appears in `/api/nodes` (with the
+flag) and `/api/flags` so its bad location remains visible for inspection.
+
+Coverage areas are the polygons published at `network_area_url` (a GeoJSON
+`FeatureCollection` keyed by `networkId`), reloaded every `network_area_interval`.
+A node is only evaluated against networks that have a known area; if none of its
+networks has coverage, or it has no GPS, it is left unflagged. Set
+`network_area_url = ""` to disable flagging entirely.
+
+`GET /api/flags` returns:
+
+```json
+{
+  "count": 2,
+  "thresholdKm": 1000,
+  "lastScanAt": "2026-07-01T12:00:00Z",
+  "nodes": [
+    {
+      "pubkey": "a1b2…", "name": "Wanderer", "type": 2, "typeName": "repeater",
+      "lat": 12.3, "lon": 45.6, "networks": ["meshcore-cz"],
+      "flags": ["far_from_network"], "lastAdvertAt": 1782057222
+    }
+  ]
+}
+```
 
 ## Metrics (Prometheus / VictoriaMetrics)
 

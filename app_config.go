@@ -58,6 +58,10 @@ type AppConfig struct {
 	SnapshotDir             string   `toml:"snapshot_dir"`
 	SnapshotBaseURL         string   `toml:"snapshot_base_url"`
 	SnapshotInterval        Duration `toml:"snapshot_interval"`
+	NetworkAreaURL          string   `toml:"network_area_url"`
+	NetworkAreaInterval     Duration `toml:"network_area_interval"`
+	FlagInterval            Duration `toml:"flag_interval"`
+	FarFromNetworkKM        float64  `toml:"far_from_network_km"`
 }
 
 func DefaultAppConfig() AppConfig {
@@ -83,6 +87,10 @@ func DefaultAppConfig() AppConfig {
 		SnapshotDir:             "snapshots",
 		SnapshotBaseURL:         "",
 		SnapshotInterval:        Duration(5 * time.Minute),
+		NetworkAreaURL:          "https://meshcore.ninja/network-area/all.geojson",
+		NetworkAreaInterval:     Duration(6 * time.Hour),
+		FlagInterval:            Duration(15 * time.Minute),
+		FarFromNetworkKM:        defaultFarFromNetworkKM,
 	}
 }
 
@@ -165,6 +173,10 @@ func bindConfigFlags(fs *flag.FlagSet, cfg AppConfig, configPath string) *AppCon
 	fs.StringVar(&out.SnapshotDir, "snapshot-dir", cfg.SnapshotDir, "directory for versioned full-map snapshot files")
 	fs.StringVar(&out.SnapshotBaseURL, "snapshot-base-url", cfg.SnapshotBaseURL, "public origin prepended to snapshot URLs in latest.json")
 	fs.DurationVar((*time.Duration)(&out.SnapshotInterval), "snapshot-interval", cfg.SnapshotInterval.Std(), "how often to regenerate the full-map snapshot")
+	fs.StringVar(&out.NetworkAreaURL, "network-area-url", cfg.NetworkAreaURL, "URL of the network coverage GeoJSON used to flag far-from-network nodes (empty = disable flagging)")
+	fs.DurationVar((*time.Duration)(&out.NetworkAreaInterval), "network-area-interval", cfg.NetworkAreaInterval.Std(), "how often to refresh network coverage areas")
+	fs.DurationVar((*time.Duration)(&out.FlagInterval), "flag-interval", cfg.FlagInterval.Std(), "how often to rescan nodes for quality flags")
+	fs.Float64Var(&out.FarFromNetworkKM, "far-from-network-km", cfg.FarFromNetworkKM, "distance from all its networks beyond which a node is flagged far_from_network")
 	return out
 }
 

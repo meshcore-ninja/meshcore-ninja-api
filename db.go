@@ -181,6 +181,10 @@ func OpenDB(path, linksPath string) (*DB, error) {
 		_ = sdb.Close()
 		return nil, fmt.Errorf("migrate adverts.analyzer_name: %w", err)
 	}
+	if err := ensureColumn(sdb, "nodes", "flags", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		_ = sdb.Close()
+		return nil, fmt.Errorf("migrate nodes.flags: %w", err)
+	}
 	linksDB, err := sql.Open("sqlite", "file:"+linksPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		_ = sdb.Close()
@@ -365,6 +369,16 @@ func (d *DB) Save(states map[string]CounterState, now int64) error {
 	return tx.Commit()
 }
 
+// marshalFlags serializes a node's flag list as a JSON array, normalizing the
+// empty/nil case to "[]" so the NOT NULL column never stores "null".
+func marshalFlags(flags []string) string {
+	if len(flags) == 0 {
+		return "[]"
+	}
+	b, _ := json.Marshal(flags)
+	return string(b)
+}
+
 func b2i(b bool) int {
 	if b {
 		return 1
@@ -376,7 +390,7 @@ func b2i(b bool) int {
 // set is stored as a JSON column; the rolling latest-adverts list is reloaded
 // separately from the adverts history (see LoadRecentAdverts).
 func (d *DB) LoadNodes() ([]NodeRecord, error) {
-	rows, err := d.db.Query(`SELECT pubkey, name, node_type, has_gps, lat, lon, first_advert_at, last_advert_at, advert_count, networks, observer_id, observer_name FROM nodes`)
+	rows, err := d.db.Query(`SELECT pubkey, name, node_type, has_gps, lat, lon, first_advert_at, last_advert_at, advert_count, networks, observer_id, observer_name, flags FROM nodes`)
 	if err != nil {
 		return nil, err
 	}
@@ -388,12 +402,14 @@ func (d *DB) LoadNodes() ([]NodeRecord, error) {
 			n        NodeRecord
 			hasGPS   int
 			networks string
+			flags    string
 		)
-		if err := rows.Scan(&n.PubKey, &n.Name, &n.NodeType, &hasGPS, &n.Lat, &n.Lon, &n.FirstAdvertAt, &n.LastAdvertAt, &n.AdvertCount, &networks, &n.ObserverID, &n.ObserverName); err != nil {
+		if err := rows.Scan(&n.PubKey, &n.Name, &n.NodeType, &hasGPS, &n.Lat, &n.Lon, &n.FirstAdvertAt, &n.LastAdvertAt, &n.AdvertCount, &networks, &n.ObserverID, &n.ObserverName, &flags); err != nil {
 			return nil, err
 		}
 		n.HasGPS = hasGPS != 0
 		_ = json.Unmarshal([]byte(networks), &n.Networks)
+		_ = json.Unmarshal([]byte(flags), &n.Flags)
 		nodes = append(nodes, n)
 	}
 	return nodes, rows.Err()
@@ -412,8 +428,8 @@ func (d *DB) SaveNodes(nodes []NodeRecord, now int64) error {
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare(`
-		INSERT INTO nodes (pubkey, name, node_type, has_gps, lat, lon, first_advert_at, last_advert_at, advert_count, networks, observer_id, observer_name, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO nodes (pubkey, name, node_type, has_gps, lat, lon, first_advert_at, last_advert_at, advert_count, networks, observer_id, observer_name, flags, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(pubkey) DO UPDATE SET
 			name            = excluded.name,
 			node_type       = excluded.node_type,
@@ -426,6 +442,7 @@ func (d *DB) SaveNodes(nodes []NodeRecord, now int64) error {
 			networks        = excluded.networks,
 			observer_id     = excluded.observer_id,
 			observer_name   = excluded.observer_name,
+			flags           = excluded.flags,
 			updated_at      = excluded.updated_at`)
 	if err != nil {
 		return err
@@ -434,7 +451,8 @@ func (d *DB) SaveNodes(nodes []NodeRecord, now int64) error {
 
 	for _, n := range nodes {
 		networks, _ := json.Marshal(n.Networks)
-		if _, err := stmt.Exec(n.PubKey, n.Name, n.NodeType, b2i(n.HasGPS), n.Lat, n.Lon, n.FirstAdvertAt, n.LastAdvertAt, n.AdvertCount, string(networks), n.ObserverID, n.ObserverName, now); err != nil {
+		flags := marshalFlags(n.Flags)
+		if _, err := stmt.Exec(n.PubKey, n.Name, n.NodeType, b2i(n.HasGPS), n.Lat, n.Lon, n.FirstAdvertAt, n.LastAdvertAt, n.AdvertCount, string(networks), n.ObserverID, n.ObserverName, flags, now); err != nil {
 			return err
 		}
 	}

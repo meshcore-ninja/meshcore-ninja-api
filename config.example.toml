@@ -29,3 +29,13 @@ import_interval = "1h"
 snapshot_dir = "snapshots"
 snapshot_base_url = "https://api.meshcore.ninja"
 snapshot_interval = "5m"
+
+# Node quality flagging. The flagger periodically scans nodes against each
+# network's published coverage polygons (network_area_url) and tags any whose GPS
+# is farther than far_from_network_km from every network it belongs to. Flags
+# surface on /api/nodes, the map snapshot, and /api/flags. Set network_area_url
+# empty to disable flagging.
+network_area_url = "https://meshcore.ninja/network-area/all.geojson"
+network_area_interval = "6h"
+flag_interval = "15m"
+far_from_network_km = 1000.0

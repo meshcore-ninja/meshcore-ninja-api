@@ -59,6 +59,9 @@ type NodeRecord struct {
 	ObserverID    string              // observer of the most recent advert
 	ObserverName  string              // observer of the most recent advert
 	LatestAdverts []AdvertObservation // this node's most recent adverts, newest first, capped
+	// Flags are machine-readable quality tags (e.g. "far_from_network") assigned
+	// by the periodic Flagger scan, not by adverts. Nil when the node is clean.
+	Flags []string
 }
 
 // defaultAdvertsPerNode is how many recent adverts each node keeps.
@@ -204,6 +207,7 @@ func (r *NodeRegistry) Lookup(pubkey string) (NodeRecord, bool) {
 	}
 	rec := *n
 	rec.Networks = append([]string(nil), n.Networks...)
+	rec.Flags = append([]string(nil), n.Flags...)
 	rec.LatestAdverts = nil
 	return rec, true
 }
@@ -213,6 +217,76 @@ func (r *NodeRegistry) Count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.nodes)
+}
+
+// eachNode calls fn for every node under the registry lock. fn must only read
+// the record and must not retain the pointer; it runs on the hot registry mutex.
+// Used by the Flagger to evaluate flag rules without copying the whole registry.
+func (r *NodeRegistry) eachNode(fn func(*NodeRecord)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, n := range r.nodes {
+		fn(n)
+	}
+}
+
+// ApplyFlags sets each node's flags to the desired value, marking nodes whose
+// flag set actually changed dirty so the change is persisted. desired maps a
+// pubkey to its full new flag list (nil/empty clears the node's flags). Nodes
+// absent from desired are left untouched. Returns how many nodes changed.
+func (r *NodeRegistry) ApplyFlags(desired map[string][]string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	changed := 0
+	for pubkey, flags := range desired {
+		n := r.nodes[pubkey]
+		if n == nil || sameFlags(n.Flags, flags) {
+			continue
+		}
+		if len(flags) == 0 {
+			n.Flags = nil
+		} else {
+			n.Flags = append([]string(nil), flags...)
+		}
+		r.dirty[pubkey] = struct{}{}
+		changed++
+	}
+	return changed
+}
+
+// sameFlags reports whether two flag lists are equal in order and contents. The
+// Flagger produces flags in a fixed order, so a positional compare is sufficient.
+func sameFlags(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// FlaggedNodes returns a copy of every node that currently carries at least one
+// flag, ordered by pubkey, with the heavy rolling advert list dropped. Backs the
+// /api/flags endpoint.
+func (r *NodeRegistry) FlaggedNodes() []NodeRecord {
+	r.mu.Lock()
+	out := make([]NodeRecord, 0, 16)
+	for _, n := range r.nodes {
+		if len(n.Flags) == 0 {
+			continue
+		}
+		rec := *n
+		rec.Networks = append([]string(nil), n.Networks...)
+		rec.Flags = append([]string(nil), n.Flags...)
+		rec.LatestAdverts = nil
+		out = append(out, rec)
+	}
+	r.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].PubKey < out[j].PubKey })
+	return out
 }
 
 // --- API view shapes ---
@@ -250,6 +324,9 @@ type NodeView struct {
 	Networks      []string     `json:"networks"`
 	ObserverName  string       `json:"observerName,omitempty"`
 	LatestAdverts []AdvertView `json:"latestAdverts"`
+	// Flags are quality tags assigned by the Flagger scan (e.g. "far_from_network").
+	// Omitted when the node is clean so consumers can treat presence as a signal.
+	Flags []string `json:"flags,omitempty"`
 	// Source is "live" for a node observed by our analyzers or "map" for one we
 	// only know from the mirrored map.meshcore.io directory. OnMap is true when the
 	// node also appears in that directory (regardless of source).
@@ -297,6 +374,7 @@ func nodeView(n *NodeRecord) NodeView {
 		Networks:      append([]string(nil), n.Networks...),
 		ObserverName:  n.ObserverName,
 		LatestAdverts: advertViews(n.LatestAdverts),
+		Flags:         append([]string(nil), n.Flags...),
 	}
 }
 
@@ -345,6 +423,7 @@ type SearchResult struct {
 	LastAdvertAt  int64    `json:"lastAdvertAt"`
 	AdvertCount   uint64   `json:"advertCount"`
 	Networks      []string `json:"networks"`
+	Flags         []string `json:"flags,omitempty"`
 	DistanceKM    float64  `json:"distanceKm,omitempty"`
 	// Source is "live" (observed by our analyzers) or "map" (only known from the
 	// mirrored map.meshcore.io directory). Lets the UI flag directory-only hits.
@@ -427,6 +506,7 @@ func (r *NodeRegistry) Search(p MapParams, limit int) (results []SearchResult, t
 			LastAdvertAt:  n.LastAdvertAt,
 			AdvertCount:   n.AdvertCount,
 			Networks:      append([]string(nil), n.Networks...),
+			Flags:         append([]string(nil), n.Flags...),
 			Source:        "live",
 		})
 	}
@@ -444,6 +524,7 @@ func (r *NodeRegistry) Export() []NodeRecord {
 	for _, n := range r.nodes {
 		rec := *n
 		rec.Networks = append([]string(nil), n.Networks...)
+		rec.Flags = append([]string(nil), n.Flags...)
 		rec.LatestAdverts = nil
 		out = append(out, rec)
 	}
@@ -468,6 +549,7 @@ func (r *NodeRegistry) TakeDirty() []NodeRecord {
 		}
 		rec := *n
 		rec.Networks = append([]string(nil), n.Networks...)
+		rec.Flags = append([]string(nil), n.Flags...)
 		rec.LatestAdverts = nil
 		out = append(out, rec)
 	}
