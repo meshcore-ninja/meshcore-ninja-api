@@ -1,0 +1,12 @@
+.cache
+.git
+.github
+bin
+meshcore-ninja-api
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+*.log
+.DS_Store

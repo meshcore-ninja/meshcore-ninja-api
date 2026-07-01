@@ -1,0 +1,23 @@
+# syntax=docker/dockerfile:1
+
+# meshcore-ninja-api: Go service that reads catalog data, connects to CoreScope
+# analyzers, and exposes live MeshCore network metrics.
+
+FROM golang:1.25-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG VERSION=docker
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/meshcore-ninja-api .
+
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /app/data /app/state
+WORKDIR /app
+COPY --from=build /out/meshcore-ninja-api /usr/local/bin/meshcore-ninja-api
+EXPOSE 8080
+ENTRYPOINT ["meshcore-ninja-api"]
+CMD ["--data", "/app/data", "--addr", ":8080", "--db", "/app/state/meshcore.db"]
