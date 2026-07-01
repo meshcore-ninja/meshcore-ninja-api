@@ -98,12 +98,17 @@ func (s *MapSnapshotter) Run(ctx context.Context, startupDone <-chan struct{}, i
 
 // generateOnce builds and publishes one snapshot atomically.
 func (s *MapSnapshotter) generateOnce() error {
-	now := time.Now().UTC()
+	start := time.Now()
+	now := start.UTC()
 	ts := now.Format("20060102T150405Z")
 	fname := "map-" + ts + ".json.zst"
 	logicalURL := strings.TrimRight(s.baseURL, "/") + "/api/snapshots/map-" + ts + ".json"
 
+	tQuery := time.Now()
 	nodes := s.collectNodes()
+	queryMs := float64(time.Since(tQuery).Microseconds()) / 1000
+
+	tEncode := time.Now()
 	payload := snapshotPayload{
 		FormatVersion: snapshotFormatVersion,
 		GeneratedAt:   now.Format(time.RFC3339),
@@ -127,6 +132,7 @@ func (s *MapSnapshotter) generateOnce() error {
 		return fmt.Errorf("finalizing zstd: %w", err)
 	}
 	compressed := buf.Bytes()
+	encodeMs := float64(time.Since(tEncode).Microseconds()) / 1000
 
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return fmt.Errorf("creating snapshot dir: %w", err)
@@ -167,7 +173,9 @@ func (s *MapSnapshotter) generateOnce() error {
 	s.manifest = manifest
 	s.mu.Unlock()
 
-	log.Printf("[snapshot] published %s (%d nodes, %d bytes compressed)", fname, len(nodes), len(compressed))
+	totalMs := float64(time.Since(start).Microseconds()) / 1000
+	log.Printf("[snapshot] published %s: %d nodes, %d bytes compressed (query %.1fms, encode %.1fms, total %.1fms)",
+		fname, len(nodes), len(compressed), queryMs, encodeMs, totalMs)
 	s.pruneOld(fname)
 	return nil
 }
