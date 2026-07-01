@@ -114,6 +114,28 @@ func TestLinkSNRHistoryIsDirectionalAndCapped(t *testing.T) {
 	}
 }
 
+func TestLinkTraceSNRsRightAlignWhenOriginSampleIsPresent(t *testing.T) {
+	mc, rip4, vrsetin, phone := pk(0x25), pk(0xc4), pk(0xc8), pk(0xf7)
+	reg := noDecay()
+
+	reg.ObservePathCtx(PathObservation{
+		Hash: "trace1",
+		Path: []string{mc, rip4, vrsetin, phone},
+		SNRs: []float64{12, -8, -9.25, 11.75},
+		Now:  100,
+	})
+
+	if l := mustNeighbor(t, reg, mc, rip4); !l.HasSNRSentByNode || l.LastSNRSentByNode != -8 {
+		t.Errorf("mc->rip4 snr has=%v val=%.2f, want true/-8", l.HasSNRSentByNode, l.LastSNRSentByNode)
+	}
+	if l := mustNeighbor(t, reg, rip4, vrsetin); !l.HasSNRSentByNode || l.LastSNRSentByNode != -9.25 {
+		t.Errorf("rip4->vrsetin snr has=%v val=%.2f, want true/-9.25", l.HasSNRSentByNode, l.LastSNRSentByNode)
+	}
+	if l := mustNeighbor(t, reg, vrsetin, phone); !l.HasSNRSentByNode || l.LastSNRSentByNode != 11.75 {
+		t.Errorf("vrsetin->phone snr has=%v val=%.2f, want true/11.75", l.HasSNRSentByNode, l.LastSNRSentByNode)
+	}
+}
+
 // TestLinkPositionSegments checks positions are stamped from PosOf and that a
 // move beyond the epsilon freezes a historical segment.
 func TestLinkPositionSegments(t *testing.T) {

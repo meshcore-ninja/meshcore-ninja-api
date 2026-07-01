@@ -211,10 +211,10 @@ type PathObservation struct {
 	NetworkID string
 	RouteType string // "flood","direct","transport_flood","transport_direct"; "" = unknown
 	Path      []string
-	// SNRs, when non-nil, are the per-hop SNR values (dB) decoded from a TRACE
-	// packet's accumulator (one entry per forwarding hop). They are attributed to
-	// links in accepted-hop order, best-effort — exact firmware alignment isn't
-	// guaranteed, so treat per-link SNR as indicative.
+	// SNRs, when non-nil, are SNR values (dB) decoded from a TRACE packet's
+	// accumulator. Some TRACE records include a leading sample for the origin node
+	// even though resolved_path starts at the first relay, so attribution
+	// right-aligns samples to the accepted links.
 	SNRs []float64
 	Now  int64
 	// PosOf resolves a node's current position; nil disables position stamping.
@@ -250,6 +250,7 @@ func (r *LinkRegistry) ObservePathCtx(o PathObservation) {
 	var prevRaw string
 	hop := 0 // count of accepted (normalized, de-duplicated) nodes so far
 	seen := make(map[linkKey]struct{})
+	snrBase := snrBaseIndex(o.Path, o.SNRs)
 
 	for _, raw := range o.Path {
 		raw = strings.ToLower(strings.TrimSpace(raw))
@@ -281,9 +282,9 @@ func (r *LinkRegistry) ObservePathCtx(o PathObservation) {
 						now:       o.Now,
 					}
 					obs.setPositions(o.PosOf, prevHex, raw)
-					// SNR for the link ending at cur is the accumulator entry for
-					// this forwarding hop (hop-1, since the origin records none).
-					if idx := hop - 1; idx >= 0 && idx < len(o.SNRs) {
+					// Right-align SNRs to accepted links so a TRACE origin sample
+					// does not shift every relay link by one.
+					if idx := snrBase + hop - 1; idx >= 0 && idx < len(o.SNRs) {
 						obs.snr, obs.hasSNR = o.SNRs[idx], true
 					}
 					r.observeLink(obs)
@@ -296,6 +297,48 @@ func (r *LinkRegistry) ObservePathCtx(o PathObservation) {
 		havePrev = true
 		hop++
 	}
+}
+
+func snrBaseIndex(path []string, snrs []float64) int {
+	if len(snrs) == 0 {
+		return 0
+	}
+	links := acceptedLinkCount(path)
+	if links <= 0 || len(snrs) <= links {
+		return 0
+	}
+	return len(snrs) - links
+}
+
+func acceptedLinkCount(path []string) int {
+	var prev pubKey
+	var havePrev bool
+	var prevRaw string
+	links := 0
+	for _, raw := range path {
+		raw = strings.ToLower(strings.TrimSpace(raw))
+		if raw == "" {
+			continue
+		}
+		if havePrev && raw == prevRaw {
+			continue
+		}
+		cur, ok := normalizePub(raw)
+		if !ok {
+			havePrev = false
+			prevRaw = raw
+			continue
+		}
+		if havePrev {
+			if _, ok := canonicalKey(prev, cur); ok {
+				links++
+			}
+		}
+		prev = cur
+		prevRaw = raw
+		havePrev = true
+	}
+	return links
 }
 
 // linkObs is one resolved adjacency to record: the canonical link key, the
