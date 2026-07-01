@@ -227,7 +227,7 @@ func addLiveDirectoryStats(r *NodeRegistry, stats *directoryStats, seen map[stri
 	defer r.mu.Unlock()
 	for pubkey, n := range r.nodes {
 		seen[pubkey] = struct{}{}
-		addDirectoryNode(stats, byte(n.NodeType), n.LastAdvertAt, n.HasGPS, n.Name, now)
+		addDirectoryNode(stats, byte(n.NodeType), n.LastAdvertAt, n.HasGPS && validCoords(n.Lat, n.Lon), n.Name, now)
 	}
 }
 

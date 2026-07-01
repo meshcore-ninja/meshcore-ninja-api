@@ -214,10 +214,17 @@ func (p MapParams) matchesImported(n *ImportedNode) bool {
 	return true
 }
 
+func validCoords(lat, lon float64) bool {
+	return !math.IsNaN(lat) && !math.IsNaN(lon) &&
+		!math.IsInf(lat, 0) && !math.IsInf(lon, 0) &&
+		lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180 &&
+		(lat != 0 || lon != 0)
+}
+
 // hasCoords drops imported nodes pinned at the null island (0,0), which upstream
-// uses for "no location".
+// uses for "no location", and rejects invalid coordinate ranges.
 func (n *ImportedNode) hasCoords() bool {
-	return n.AdvLat != 0 || n.AdvLon != 0
+	return validCoords(n.AdvLat, n.AdvLon)
 }
 
 // matches reports whether a node passes the (non-spatial) filters.
