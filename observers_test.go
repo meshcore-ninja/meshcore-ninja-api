@@ -81,3 +81,44 @@ func TestSaveLoadObservers(t *testing.T) {
 		t.Errorf("after upsert: %+v, want one row last_seen=250 obs=9", got)
 	}
 }
+
+func TestObserverRegistryTakeDirtyAndRequeue(t *testing.T) {
+	reg := newObserverRegistry()
+	reg.Restore([]ObserverRecord{{
+		ObserverID: "restored",
+		Name:       "Clean",
+		FirstSeen:  10,
+		LastSeen:   20,
+		Networks:   []string{"net-a"},
+	}})
+	if dirty := reg.TakeDirty(); len(dirty) != 0 {
+		t.Fatalf("restored dirty = %d, want 0", len(dirty))
+	}
+
+	reg.Observe(ObserverActivity{ObserverID: "o1", Name: "Alpha", NetworkID: "net-a", At: 100})
+	reg.Observe(ObserverActivity{ObserverID: "o1", NetworkID: "net-b", At: 200})
+	reg.Observe(ObserverActivity{ObserverID: "o2", Name: "Beta", NetworkID: "net-a", At: 150})
+
+	dirty := reg.TakeDirty()
+	if len(dirty) != 2 {
+		t.Fatalf("dirty = %d, want 2", len(dirty))
+	}
+	byID := map[string]ObserverRecord{}
+	for _, o := range dirty {
+		byID[o.ObserverID] = o
+	}
+	if byID["o1"].Name != "Alpha" || byID["o1"].Observations != 2 || byID["o1"].LastSeen != 200 {
+		t.Errorf("o1 dirty copy = %+v, want latest observer state", byID["o1"])
+	}
+	if len(byID["o1"].Networks) != 2 {
+		t.Errorf("o1 networks = %v, want 2 networks", byID["o1"].Networks)
+	}
+	if dirty := reg.TakeDirty(); len(dirty) != 0 {
+		t.Fatalf("dirty after take = %d, want 0", len(dirty))
+	}
+
+	reg.Requeue(dirty)
+	if dirty := reg.TakeDirty(); len(dirty) != 2 {
+		t.Fatalf("dirty after requeue = %d, want 2", len(dirty))
+	}
+}

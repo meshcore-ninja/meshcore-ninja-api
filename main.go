@@ -197,12 +197,14 @@ func main() {
 					log.Printf("counter flush: %v", err)
 				}
 
-				nodes := registry.Export()
-				t = time.Now()
-				err = db.SaveNodes(nodes, now)
-				metrics.observeDBFlush("nodes", len(nodes), time.Since(t), err)
-				if err != nil {
-					log.Printf("node flush: %v", err)
+				if dirty := registry.TakeDirty(); len(dirty) > 0 {
+					t = time.Now()
+					err = db.SaveNodes(dirty, now)
+					metrics.observeDBFlush("nodes", len(dirty), time.Since(t), err)
+					if err != nil {
+						log.Printf("node flush: %v", err)
+						registry.Requeue(dirty) // retry next cycle
+					}
 				}
 
 				if pending := registry.PendingAdverts(); len(pending) > 0 {
@@ -242,12 +244,14 @@ func main() {
 			ticker := time.NewTicker(cfg.ObserverPersistInterval.Std())
 			defer ticker.Stop()
 			flush := func() {
-				obs := observers.Export()
-				t := time.Now()
-				err := db.SaveObservers(obs, nowUnix())
-				metrics.observeDBFlush("observers", len(obs), time.Since(t), err)
-				if err != nil {
-					log.Printf("observer flush: %v", err)
+				if dirty := observers.TakeDirty(); len(dirty) > 0 {
+					t := time.Now()
+					err := db.SaveObservers(dirty, nowUnix())
+					metrics.observeDBFlush("observers", len(dirty), time.Since(t), err)
+					if err != nil {
+						log.Printf("observer flush: %v", err)
+						observers.Requeue(dirty) // retry next cycle
+					}
 				}
 			}
 			for {

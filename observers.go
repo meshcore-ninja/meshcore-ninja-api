@@ -33,10 +33,14 @@ type ObserverRecord struct {
 type ObserverRegistry struct {
 	mu        sync.Mutex
 	observers map[string]*ObserverRecord
+	dirty     map[string]struct{}
 }
 
 func newObserverRegistry() *ObserverRegistry {
-	return &ObserverRegistry{observers: make(map[string]*ObserverRecord)}
+	return &ObserverRegistry{
+		observers: make(map[string]*ObserverRecord),
+		dirty:     make(map[string]struct{}),
+	}
 }
 
 // Observe records one observer report: upserts the row, advances last-seen and
@@ -61,6 +65,7 @@ func (r *ObserverRegistry) Observe(a ObserverActivity) {
 	if a.NetworkID != "" && !containsStr(o.Networks, a.NetworkID) {
 		o.Networks = append(o.Networks, a.NetworkID)
 	}
+	r.dirty[a.ObserverID] = struct{}{}
 }
 
 // ObserverView is the JSON shape served by the API.
@@ -109,6 +114,41 @@ func (r *ObserverRegistry) Export() []ObserverRecord {
 		out = append(out, rec)
 	}
 	return out
+}
+
+// TakeDirty captures observer rows changed since the previous call and clears
+// the dirty set atomically. On a failed persist the caller should re-mark them
+// with Requeue so the latest in-memory state is retried.
+func (r *ObserverRegistry) TakeDirty() []ObserverRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.dirty) == 0 {
+		return nil
+	}
+	out := make([]ObserverRecord, 0, len(r.dirty))
+	for observerID := range r.dirty {
+		o := r.observers[observerID]
+		if o == nil {
+			continue
+		}
+		rec := *o
+		rec.Networks = append([]string(nil), o.Networks...)
+		out = append(out, rec)
+	}
+	r.dirty = make(map[string]struct{})
+	return out
+}
+
+// Requeue re-marks observer rows dirty after a failed persist so they flush on
+// the next cycle.
+func (r *ObserverRegistry) Requeue(records []ObserverRecord) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range records {
+		if _, exists := r.observers[records[i].ObserverID]; exists {
+			r.dirty[records[i].ObserverID] = struct{}{}
+		}
+	}
 }
 
 // Restore seeds the registry from persisted state at startup, before any

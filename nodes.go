@@ -72,6 +72,7 @@ const defaultAdvertsPerNode = 10
 type NodeRegistry struct {
 	mu         sync.Mutex
 	nodes      map[string]*NodeRecord
+	dirty      map[string]struct{} // public keys changed since the last successful overview flush
 	pending    []AdvertObservation // adverts observed but not yet persisted
 	maxAdverts int                 // per-node rolling advert cap
 	onAdvert   func(LiveAdvert)    // optional live-feed hook, invoked outside the lock
@@ -92,6 +93,7 @@ func newNodeRegistry(maxAdverts int) *NodeRegistry {
 	}
 	return &NodeRegistry{
 		nodes:      make(map[string]*NodeRecord),
+		dirty:      make(map[string]struct{}),
 		maxAdverts: maxAdverts,
 	}
 }
@@ -147,6 +149,7 @@ func (r *NodeRegistry) Observe(a AdvertObservation) {
 	// Buffer for the append-only adverts history (drained by the periodic flush).
 	r.pending = append(r.pending, a)
 
+	r.dirty[a.PubKey] = struct{}{}
 	hook := r.onAdvert
 	r.mu.Unlock()
 
@@ -438,6 +441,43 @@ func (r *NodeRegistry) Export() []NodeRecord {
 		out = append(out, rec)
 	}
 	return out
+}
+
+// TakeDirty captures node overview rows changed since the previous call and
+// clears the dirty set atomically. The returned records are deep-copied so JSON
+// encoding and SQLite writes can happen outside the registry lock. On a failed
+// persist the caller should re-mark them with Requeue.
+func (r *NodeRegistry) TakeDirty() []NodeRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.dirty) == 0 {
+		return nil
+	}
+	out := make([]NodeRecord, 0, len(r.dirty))
+	for pubkey := range r.dirty {
+		n := r.nodes[pubkey]
+		if n == nil {
+			continue
+		}
+		rec := *n
+		rec.Networks = append([]string(nil), n.Networks...)
+		rec.LatestAdverts = nil
+		out = append(out, rec)
+	}
+	r.dirty = make(map[string]struct{})
+	return out
+}
+
+// Requeue re-marks node overview rows dirty after a failed persist so their
+// latest in-memory version is retried on the next cycle.
+func (r *NodeRegistry) Requeue(records []NodeRecord) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range records {
+		if _, exists := r.nodes[records[i].PubKey]; exists {
+			r.dirty[records[i].PubKey] = struct{}{}
+		}
+	}
 }
 
 // AttachRecentAdverts fills each node's rolling latest-adverts list from a

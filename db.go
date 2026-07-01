@@ -295,7 +295,7 @@ func (d *DB) LoadNodes() ([]NodeRecord, error) {
 	return nodes, rows.Err()
 }
 
-// SaveNodes upserts every node overview row in one transaction, persisting each
+// SaveNodes upserts the given node overview rows in one transaction, persisting each
 // node's network set as JSON.
 func (d *DB) SaveNodes(nodes []NodeRecord, now int64) error {
 	tx, err := d.db.Begin()
@@ -484,7 +484,7 @@ func (d *DB) LoadObservers() ([]ObserverRecord, error) {
 	return observers, rows.Err()
 }
 
-// SaveObservers upserts every observer row in one transaction, persisting each
+// SaveObservers upserts the given observer rows in one transaction, persisting each
 // observer's network set as JSON.
 func (d *DB) SaveObservers(observers []ObserverRecord, now int64) error {
 	tx, err := d.db.Begin()

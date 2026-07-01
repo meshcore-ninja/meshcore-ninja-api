@@ -180,3 +180,47 @@ func TestRegistryPendingAdverts(t *testing.T) {
 		t.Errorf("after clear: %+v, want only cc (the unpersisted one)", remaining)
 	}
 }
+
+func TestRegistryTakeDirtyAndRequeue(t *testing.T) {
+	reg := newNodeRegistry(defaultAdvertsPerNode)
+	reg.Restore(
+		[]NodeRecord{{PubKey: "restored", Name: "clean", Networks: []string{"net-a"}}},
+		nil,
+	)
+	if dirty := reg.TakeDirty(); len(dirty) != 0 {
+		t.Fatalf("restored dirty = %d, want 0", len(dirty))
+	}
+
+	reg.Observe(AdvertObservation{PubKey: "aa", Name: "first", At: 100, NetworkID: "net-a"})
+	reg.Observe(AdvertObservation{PubKey: "aa", Name: "second", At: 200, NetworkID: "net-b"})
+	reg.Observe(AdvertObservation{PubKey: "bb", Name: "other", At: 300, NetworkID: "net-a"})
+
+	dirty := reg.TakeDirty()
+	if len(dirty) != 2 {
+		t.Fatalf("dirty = %d, want 2", len(dirty))
+	}
+	byPubKey := map[string]NodeRecord{}
+	for _, n := range dirty {
+		byPubKey[n.PubKey] = n
+		if n.LatestAdverts != nil {
+			t.Errorf("%s LatestAdverts = %+v, want nil for persistence copy", n.PubKey, n.LatestAdverts)
+		}
+	}
+	if byPubKey["aa"].Name != "second" || byPubKey["aa"].AdvertCount != 2 {
+		t.Errorf("aa dirty copy = %+v, want latest overview", byPubKey["aa"])
+	}
+	if len(byPubKey["aa"].Networks) != 2 {
+		t.Errorf("aa networks = %v, want 2 networks", byPubKey["aa"].Networks)
+	}
+	if dirty := reg.TakeDirty(); len(dirty) != 0 {
+		t.Fatalf("dirty after take = %d, want 0", len(dirty))
+	}
+
+	reg.Requeue(dirty)
+	if dirty := reg.TakeDirty(); len(dirty) != 2 {
+		t.Fatalf("dirty after requeue = %d, want 2", len(dirty))
+	}
+	if dirty := reg.TakeDirty(); len(dirty) != 0 {
+		t.Fatalf("dirty after retry take = %d, want 0", len(dirty))
+	}
+}
