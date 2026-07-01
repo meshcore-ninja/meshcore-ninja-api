@@ -39,23 +39,37 @@ type ImportedNode struct {
 	InsertedBy   string          `json:"inserted_by"`
 	UpdatedBy    string          `json:"updated_by"`
 
-	lastAt int64 // last_advert parsed to unix seconds, precomputed by cacheDerived
+	lastAt  int64   // last_advert parsed to unix seconds, precomputed by cacheDerived
+	freqMHz float64 // params.freq (radio frequency in MHz), precomputed by cacheDerived
 }
 
-// cacheDerived parses last_advert into unix seconds once, on the single build
-// goroutine, so the shared snapshot can be read concurrently without a data race.
+// cacheDerived parses derived fields once, on the single build goroutine, so the
+// shared snapshot can be read concurrently without a data race: last_advert into
+// unix seconds and the radio frequency (params.freq) so the map can show a band
+// for these unsigned nodes, which carry no network membership.
 func (n *ImportedNode) cacheDerived() {
 	n.lastAt = 0
-	if n.LastAdvert == "" {
-		return
+	if n.LastAdvert != "" {
+		if t, err := time.Parse(time.RFC3339, n.LastAdvert); err == nil {
+			n.lastAt = t.Unix()
+		}
 	}
-	if t, err := time.Parse(time.RFC3339, n.LastAdvert); err == nil {
-		n.lastAt = t.Unix()
+	n.freqMHz = 0
+	if len(n.Params) > 0 {
+		var p struct {
+			Freq float64 `json:"freq"`
+		}
+		if err := json.Unmarshal(n.Params, &p); err == nil {
+			n.freqMHz = p.Freq
+		}
 	}
 }
 
 // lastAdvertUnix returns last_advert as unix seconds (precomputed; 0 if absent).
 func (n *ImportedNode) lastAdvertUnix() int64 { return n.lastAt }
+
+// frequencyMHz returns the radio frequency in MHz (precomputed; 0 if absent).
+func (n *ImportedNode) frequencyMHz() float64 { return n.freqMHz }
 
 // historySig is a content hash over the publish-relevant fields of a node — name,
 // type, location, link, source, who submitted/updated it and when. last_advert is

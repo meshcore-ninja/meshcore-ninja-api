@@ -23,13 +23,14 @@ const snapshotFormatVersion = 1
 
 // snapshotPayload is the full-map snapshot written to disk as a zstd-compressed
 // JSON file. Nodes is a compact array-of-arrays; each inner tuple is:
-// [pubkey, name, nodeType, lat, lon, lastAdvertAt, advertCount, networks[]].
+// [pubkey, name, nodeType, lat, lon, lastAdvertAt, advertCount, networks[], freqMHz].
 // advertCount=0 marks imported (map.meshcore.io) nodes that carry no network
-// membership; live nodes always have advertCount≥1.
+// membership; live nodes always have advertCount≥1. freqMHz is the imported
+// node's radio frequency (0 for live nodes, which band via their networks).
 type snapshotPayload struct {
 	FormatVersion int      `json:"formatVersion"`
 	GeneratedAt   string   `json:"generatedAt"`
-	Nodes         [][8]any `json:"nodes"`
+	Nodes         [][9]any `json:"nodes"`
 }
 
 // SnapshotManifest is written to latest.json alongside the snapshot files and
@@ -182,12 +183,14 @@ func (s *MapSnapshotter) generateOnce() error {
 
 // collectNodes assembles the compact node tuples for the snapshot. Live nodes
 // take priority over imported ones on duplicate public keys. Tuple layout:
-// [pubkey, name, nodeType, lat, lon, lastAdvertAt, advertCount, networks[]].
-func (s *MapSnapshotter) collectNodes() [][8]any {
+// [pubkey, name, nodeType, lat, lon, lastAdvertAt, advertCount, networks[], freqMHz].
+// freqMHz is the imported node's radio frequency (0 for live nodes, which the
+// client bands via their network membership instead).
+func (s *MapSnapshotter) collectNodes() [][9]any {
 	imported := s.imported.Records()
 
 	s.nodes.mu.Lock()
-	out := make([][8]any, 0, len(s.nodes.nodes)+len(imported))
+	out := make([][9]any, 0, len(s.nodes.nodes)+len(imported))
 	seen := make(map[string]bool, len(s.nodes.nodes))
 	for _, n := range s.nodes.nodes {
 		if !n.HasGPS || !validCoords(n.Lat, n.Lon) {
@@ -198,7 +201,7 @@ func (s *MapSnapshotter) collectNodes() [][8]any {
 		if nets == nil {
 			nets = []string{}
 		}
-		out = append(out, [8]any{n.PubKey, n.Name, n.NodeType, n.Lat, n.Lon, n.LastAdvertAt, n.AdvertCount, nets})
+		out = append(out, [9]any{n.PubKey, n.Name, n.NodeType, n.Lat, n.Lon, n.LastAdvertAt, n.AdvertCount, nets, float64(0)})
 	}
 	s.nodes.mu.Unlock()
 
@@ -206,7 +209,7 @@ func (s *MapSnapshotter) collectNodes() [][8]any {
 		if seen[n.PublicKey] || !n.hasCoords() {
 			continue
 		}
-		out = append(out, [8]any{n.PublicKey, n.AdvName, byte(n.Type), n.AdvLat, n.AdvLon, n.lastAdvertUnix(), uint64(0), []string{}})
+		out = append(out, [9]any{n.PublicKey, n.AdvName, byte(n.Type), n.AdvLat, n.AdvLon, n.lastAdvertUnix(), uint64(0), []string{}, n.frequencyMHz()})
 	}
 	return out
 }
