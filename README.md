@@ -52,8 +52,8 @@ bytes (`raw_hex`) with `meshpkt` to recover the node's public key, name, type
   history table below.
 
 The node overview is kept in memory and flushed to SQLite (one `nodes` row per
-node, with the network set as a JSON column) on the same `persist_interval` as
-the counters. In addition, **every** advert is appended to a separate, append-only
+node, with the network set as a JSON column) on `node_persist_interval`. In
+addition, **every** advert is appended on `advert_persist_interval` to a separate, append-only
 `adverts` history table (one row per advert, ordered by arrival `id`), so the full
 advert history is available in SQL for analytics — not just the last 10 per node.
 On startup the per-node rolling list is repopulated from this table.
@@ -126,6 +126,10 @@ observer_ttl = "1h"
 
 db = "/app/state/meshcore.db"
 persist_interval = "20s"
+counter_persist_interval = "20s"
+node_persist_interval = "20s"
+advert_persist_interval = "20s"
+link_persist_interval = "20s"
 observer_persist_interval = "12s"
 
 import_url = "https://map.meshcore.io/api/v1/nodes?binary=0&short=0"
@@ -146,7 +150,11 @@ Config keys:
 | `link_halflife` | `24h` | half-life of a link's recent-activity score |
 | `observer_ttl` | `1h` | drop observers/nodes idle longer than this |
 | `db` | `meshcore.db` | SQLite file for persisting counters across restarts; empty = in-memory only |
-| `persist_interval` | `20s` | how often to flush counters/nodes to `db` |
+| `persist_interval` | `20s` | fallback interval for counter/node/advert/link flushes when a collection-specific interval is omitted |
+| `counter_persist_interval` | `20s` | how often to flush counters to `db`; `0s` disables periodic counter flushes except shutdown |
+| `node_persist_interval` | `20s` | how often to flush dirty node overview rows to `db`; `0s` disables periodic node flushes except shutdown |
+| `advert_persist_interval` | `20s` | how often to flush pending advert history rows to `db`; `0s` disables periodic advert flushes except shutdown |
+| `link_persist_interval` | `20s` | how often to flush dirty link rows to `db`; `0s` disables periodic link flushes except shutdown |
 | `observer_persist_interval` | `12s` | how often to flush observer activity to `db` |
 | `import_url` | `https://map.meshcore.io/api/v1/nodes?binary=0&short=0` | external node directory to mirror; empty disables |
 | `import_interval` | `1h` | how often to sync the external node directory |
@@ -166,7 +174,7 @@ process restart.
 
 Counters persist to `meshcore.db` by default, using the pure-Go
 [`modernc.org/sqlite`](https://modernc.org/sqlite) driver (no cgo). Every
-`persist_interval` (and once on shutdown) each scope's durable state —
+`counter_persist_interval` (and once on shutdown) each scope's durable state —
 cumulative totals, payload-type breakdown, and the node/observer sets — is
 upserted as one row per scope, so totals and gauges continue across restarts.
 The short-lived dedup maps and the pkt/m rate window are not persisted; they

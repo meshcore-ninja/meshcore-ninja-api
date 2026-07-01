@@ -199,93 +199,98 @@ func main() {
 	// Periodically flush counters to SQLite, with a final flush on shutdown so
 	// the latest state is captured before exit.
 	if db != nil {
-		go func() {
-			ticker := time.NewTicker(cfg.PersistInterval.Std())
-			defer ticker.Stop()
-			flush := func() {
-				now := nowUnix()
-
-				counters := store.Export()
-				t := time.Now()
-				err := db.Save(counters, now)
-				metrics.observeDBFlush("counters", len(counters), time.Since(t), err)
-				if err != nil {
-					log.Printf("counter flush: %v", err)
-				}
-
-				if dirty := registry.TakeDirty(); len(dirty) > 0 {
-					t = time.Now()
-					err = db.SaveNodes(dirty, now)
-					metrics.observeDBFlush("nodes", len(dirty), time.Since(t), err)
-					if err != nil {
-						log.Printf("node flush: %v", err)
-						registry.Requeue(dirty) // retry next cycle
-					} else {
-						db.setLoadedNodeCount(registry.Count())
-					}
-				}
-
-				if pending := registry.PendingAdverts(); len(pending) > 0 {
-					t = time.Now()
-					err = db.AppendAdverts(pending)
-					metrics.observeDBFlush("adverts", len(pending), time.Since(t), err)
-					if err != nil {
-						log.Printf("advert flush: %v", err)
-					} else {
-						registry.ClearPending(len(pending))
-					}
-				}
-				select {
-				case <-linkRestoreDone:
-					if dirty := links.TakeDirty(); len(dirty) > 0 {
-						t = time.Now()
-						err = db.SaveLinks(dirty, now)
-						metrics.observeDBFlush("links", len(dirty), time.Since(t), err)
-						if err != nil {
-							log.Printf("link flush: %v", err)
-							links.Requeue(dirty) // retry next cycle
-						}
-					}
-				default:
-				}
-			}
-			for {
-				select {
-				case <-ctx.Done():
-					flush() // final flush captures the latest state before exit
-					return
-				case <-ticker.C:
+		runFlushLoop := func(interval time.Duration, flush func()) {
+			if interval <= 0 {
+				go func() {
+					<-ctx.Done()
 					flush()
+				}()
+				return
+			}
+			go func() {
+				ticker := time.NewTicker(interval)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						flush() // final flush captures the latest state before exit
+						return
+					case <-ticker.C:
+						flush()
+					}
+				}
+			}()
+		}
+
+		runFlushLoop(cfg.CounterPersistInterval.Std(), func() {
+			now := nowUnix()
+			counters := store.Export()
+			t := time.Now()
+			err := db.Save(counters, now)
+			metrics.observeDBFlush("counters", len(counters), time.Since(t), err)
+			if err != nil {
+				log.Printf("counter flush: %v", err)
+			}
+		})
+
+		runFlushLoop(cfg.NodePersistInterval.Std(), func() {
+			now := nowUnix()
+			if dirty := registry.TakeDirty(); len(dirty) > 0 {
+				t := time.Now()
+				err := db.SaveNodes(dirty, now)
+				metrics.observeDBFlush("nodes", len(dirty), time.Since(t), err)
+				if err != nil {
+					log.Printf("node flush: %v", err)
+					registry.Requeue(dirty) // retry next cycle
+				} else {
+					db.setLoadedNodeCount(registry.Count())
 				}
 			}
-		}()
+		})
+
+		runFlushLoop(cfg.AdvertPersistInterval.Std(), func() {
+			if pending := registry.PendingAdverts(); len(pending) > 0 {
+				t := time.Now()
+				err := db.AppendAdverts(pending)
+				metrics.observeDBFlush("adverts", len(pending), time.Since(t), err)
+				if err != nil {
+					log.Printf("advert flush: %v", err)
+				} else {
+					registry.ClearPending(len(pending))
+				}
+			}
+		})
+
+		runFlushLoop(cfg.LinkPersistInterval.Std(), func() {
+			select {
+			case <-linkRestoreDone:
+				if dirty := links.TakeDirty(); len(dirty) > 0 {
+					t := time.Now()
+					err := db.SaveLinks(dirty, nowUnix())
+					metrics.observeDBFlush("links", len(dirty), time.Since(t), err)
+					if err != nil {
+						log.Printf("link flush: %v", err)
+						links.Requeue(dirty) // retry next cycle
+					}
+				}
+			default:
+			}
+		})
 
 		// Observer activity flushes on its own (shorter) interval so the
 		// "latest activity" table stays close to real time.
-		go func() {
-			ticker := time.NewTicker(cfg.ObserverPersistInterval.Std())
-			defer ticker.Stop()
-			flush := func() {
-				if dirty := observers.TakeDirty(); len(dirty) > 0 {
-					t := time.Now()
-					err := db.SaveObservers(dirty, nowUnix())
-					metrics.observeDBFlush("observers", len(dirty), time.Since(t), err)
-					if err != nil {
-						log.Printf("observer flush: %v", err)
-						observers.Requeue(dirty) // retry next cycle
-					}
+		runFlushLoop(cfg.ObserverPersistInterval.Std(), func() {
+			if dirty := observers.TakeDirty(); len(dirty) > 0 {
+				t := time.Now()
+				now := nowUnix()
+				err := db.SaveObservers(dirty, now)
+				metrics.observeDBFlush("observers", len(dirty), time.Since(t), err)
+				if err != nil {
+					log.Printf("observer flush: %v", err)
+					observers.Requeue(dirty) // retry next cycle
 				}
 			}
-			for {
-				select {
-				case <-ctx.Done():
-					flush() // final flush before exit
-					return
-				case <-ticker.C:
-					flush()
-				}
-			}
-		}()
+		})
 	}
 
 	srv := &http.Server{

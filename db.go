@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"sync/atomic"
 
 	_ "modernc.org/sqlite"
@@ -14,6 +15,7 @@ import (
 // row per scope; the periodic flush upserts every scope inside one transaction.
 type DB struct {
 	db    *sql.DB
+	write sync.Mutex
 	stats atomicStats
 }
 
@@ -306,6 +308,9 @@ func (d *DB) Load() (map[string]CounterState, error) {
 
 // Save upserts every scope in one transaction.
 func (d *DB) Save(states map[string]CounterState, now int64) error {
+	d.write.Lock()
+	defer d.write.Unlock()
+
 	tx, err := d.db.Begin()
 	if err != nil {
 		return err
@@ -376,6 +381,9 @@ func (d *DB) LoadNodes() ([]NodeRecord, error) {
 // SaveNodes upserts the given node overview rows in one transaction, persisting each
 // node's network set as JSON.
 func (d *DB) SaveNodes(nodes []NodeRecord, now int64) error {
+	d.write.Lock()
+	defer d.write.Unlock()
+
 	tx, err := d.db.Begin()
 	if err != nil {
 		return err
@@ -421,6 +429,9 @@ func (d *DB) AppendAdverts(adverts []AdvertObservation) error {
 	if len(adverts) == 0 {
 		return nil
 	}
+	d.write.Lock()
+	defer d.write.Unlock()
+
 	tx, err := d.db.Begin()
 	if err != nil {
 		return err
@@ -456,6 +467,9 @@ func (d *DB) SaveLinks(records []LinkRecord, now int64) error {
 	if len(records) == 0 {
 		return nil
 	}
+	d.write.Lock()
+	defer d.write.Unlock()
+
 	tx, err := d.db.Begin()
 	if err != nil {
 		return err
@@ -572,6 +586,9 @@ func (d *DB) LoadObservers() ([]ObserverRecord, error) {
 // SaveObservers upserts the given observer rows in one transaction, persisting each
 // observer's network set as JSON.
 func (d *DB) SaveObservers(observers []ObserverRecord, now int64) error {
+	d.write.Lock()
+	defer d.write.Unlock()
+
 	tx, err := d.db.Begin()
 	if err != nil {
 		return err
@@ -758,6 +775,9 @@ func (d *DB) DailyAdvertStatsForNode(pubkey string, since int64) ([]DailyAdvertS
 // in one transaction, upserting every node by public key. This table is kept
 // entirely separate from the live `nodes` registry.
 func (d *DB) SaveImportedNodes(nodes []*ImportedNode, now int64) error {
+	d.write.Lock()
+	defer d.write.Unlock()
+
 	tx, err := d.db.Begin()
 	if err != nil {
 		return err
@@ -836,6 +856,9 @@ func (d *DB) LoadImportedNodes() ([]*ImportedNode, error) {
 // (and last_advert) refreshed, so the table grows only when a node is actually
 // re-published with changed metadata.
 func (d *DB) SaveImportedNodeHistory(nodes []*ImportedNode, now int64) error {
+	d.write.Lock()
+	defer d.write.Unlock()
+
 	tx, err := d.db.Begin()
 	if err != nil {
 		return err

@@ -14,6 +14,10 @@ observer_ttl = "1h"
 
 db = "meshcore.db"
 persist_interval = "20s"
+counter_persist_interval = "20s"
+node_persist_interval = "20s"
+advert_persist_interval = "20s"
+link_persist_interval = "20s"
 observer_persist_interval = "12s"
 
 import_url = "https://map.meshcore.io/api/v1/nodes?binary=0&short=0"
