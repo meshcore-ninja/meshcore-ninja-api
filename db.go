@@ -171,6 +171,14 @@ func OpenDB(path string) (*DB, error) {
 
 func (d *DB) Close() error { return d.db.Close() }
 
+// SQLiteStats is a lightweight snapshot of current durable table sizes.
+type SQLiteStats struct {
+	Nodes               int64 `json:"nodes"`
+	ImportedNodes       int64 `json:"importedNodes"`
+	Adverts             int64 `json:"adverts"`
+	ImportedNodeHistory int64 `json:"importedNodeHistory"`
+}
+
 func ensureColumn(db *sql.DB, table, column, decl string) error {
 	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
 	if err != nil {
@@ -198,6 +206,27 @@ func ensureColumn(db *sql.DB, table, column, decl string) error {
 	}
 	_, err = db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + decl)
 	return err
+}
+
+// Stats counts rows in the fixed persistence tables. It intentionally avoids
+// high-cardinality grouping so it stays cheap enough for API calls and scrapes.
+func (d *DB) Stats() (SQLiteStats, error) {
+	var st SQLiteStats
+	counts := []struct {
+		table string
+		dst   *int64
+	}{
+		{"nodes", &st.Nodes},
+		{"imported_nodes", &st.ImportedNodes},
+		{"adverts", &st.Adverts},
+		{"imported_node_history", &st.ImportedNodeHistory},
+	}
+	for _, c := range counts {
+		if err := d.db.QueryRow(`SELECT COUNT(*) FROM ` + c.table).Scan(c.dst); err != nil {
+			return SQLiteStats{}, err
+		}
+	}
+	return st, nil
 }
 
 // Load reads every persisted scope back into memory.

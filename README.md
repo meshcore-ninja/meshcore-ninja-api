@@ -176,6 +176,8 @@ and keep counters in-memory only.
 ## Endpoints
 
 - `GET /api/health` — `{ok, networks, analyzers, analyzersConnected, time}`
+- `GET /api/stats` — current registry and storage counts:
+  `{nodes: {live, imported, total}, sqlite: {nodes, importedNodes, adverts, importedNodeHistory}}`
 - `GET /api/networks` — `{networks: [networkSummary]}` — used by the Networks list.
 - `GET /api/networks/{id}` — network detail with `payloadTypes` and a per-analyzer
   breakdown — used by the network detail page.
@@ -290,6 +292,8 @@ Service metrics:
 | `meshcore_db_flush_duration_seconds` | histogram | `op` | SQLite flush latency (`counters`, `nodes`, `adverts`, `links`, `observers`) |
 | `meshcore_db_flush_errors_total` | counter | `op` | SQLite flush errors |
 | `meshcore_db_rows_written_total` | counter | `op` | rows written to SQLite |
+| `meshcore_registry_nodes_current` | gauge | `source` | current in-memory node counts (`live`, `imported`) |
+| `meshcore_sqlite_rows` | gauge | `table` | current SQLite row counts for fixed persistence tables (`nodes`, `imported_nodes`, `adverts`, `imported_node_history`) |
 | `meshcore_api_requests_total` | counter | `route`, `method`, `code` | HTTP API requests by normalized route and status |
 | `meshcore_api_request_duration_seconds` | histogram | `route`, `method` | HTTP API request latency |
 | `meshcore_api_response_size_bytes` | histogram | `route` | HTTP API response body size (uncompressed) |

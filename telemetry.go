@@ -44,6 +44,8 @@ type Metrics struct {
 	dbFlushDuration *prometheus.HistogramVec // op
 	dbFlushErrors   *prometheus.CounterVec   // op
 	dbRowsWritten   *prometheus.CounterVec   // op
+	registryNodes   *prometheus.GaugeVec     // source
+	sqliteRows      *prometheus.GaugeVec     // table
 
 	// --- API performance ---
 	apiRequests        *prometheus.CounterVec   // route, method, code
@@ -118,6 +120,16 @@ func NewMetrics() *Metrics {
 		Name: "meshcore_db_rows_written_total",
 		Help: "Rows written to SQLite, by operation.",
 	}, []string{"op"})
+
+	m.registryNodes = factory.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "meshcore_registry_nodes_current",
+		Help: "Current nodes held in memory, by source.",
+	}, []string{"source"})
+
+	m.sqliteRows = factory.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "meshcore_sqlite_rows",
+		Help: "Current SQLite row counts for fixed persistence tables.",
+	}, []string{"table"})
 
 	m.apiRequests = factory.NewCounterVec(prometheus.CounterOpts{
 		Name: "meshcore_api_requests_total",
@@ -228,6 +240,24 @@ func (m *Metrics) observeDBFlush(op string, rows int, dur time.Duration, err err
 	if rows > 0 {
 		m.dbRowsWritten.WithLabelValues(op).Add(float64(rows))
 	}
+}
+
+// updateStorageStats refreshes current-state gauges immediately before serving
+// /metrics. Storage stats are gauges (not counters): they can decrease if a DB is
+// rebuilt or an import mirror replaces its current rows.
+func (m *Metrics) updateStorageStats(liveNodes, importedNodes int, sqlite *SQLiteStats) {
+	if m == nil {
+		return
+	}
+	m.registryNodes.WithLabelValues("live").Set(float64(liveNodes))
+	m.registryNodes.WithLabelValues("imported").Set(float64(importedNodes))
+	if sqlite == nil {
+		return
+	}
+	m.sqliteRows.WithLabelValues("nodes").Set(float64(sqlite.Nodes))
+	m.sqliteRows.WithLabelValues("imported_nodes").Set(float64(sqlite.ImportedNodes))
+	m.sqliteRows.WithLabelValues("adverts").Set(float64(sqlite.Adverts))
+	m.sqliteRows.WithLabelValues("imported_node_history").Set(float64(sqlite.ImportedNodeHistory))
 }
 
 // statusRecorder captures the response status code and body size for API

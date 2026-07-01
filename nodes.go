@@ -208,6 +208,13 @@ func (r *NodeRegistry) Lookup(pubkey string) (NodeRecord, bool) {
 	return rec, true
 }
 
+// Count returns the number of live-observed nodes currently held in memory.
+func (r *NodeRegistry) Count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.nodes)
+}
+
 // --- API view shapes ---
 
 // AdvertView is one entry in a node's rolling latest-adverts list. The pubkey is

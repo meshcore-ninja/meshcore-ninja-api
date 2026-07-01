@@ -33,6 +33,7 @@ func (s *Server) Handler() http.Handler {
 	// Each route is instrumented under a fixed, normalized label so path
 	// variables (network id, pubkey) never inflate metric cardinality.
 	mux.HandleFunc("/api/health", s.instrument("/api/health", s.handleHealth))
+	mux.HandleFunc("/api/stats", s.instrument("/api/stats", s.handleStats))
 	mux.HandleFunc("/api/networks", s.instrument("/api/networks", s.handleNetworks))
 	mux.HandleFunc("/api/networks/", s.instrument("/api/networks/:id", s.handleNetworkDetail))
 	mux.HandleFunc("/api/nodes", s.instrument("/api/nodes", s.handleNodes))
@@ -45,7 +46,7 @@ func (s *Server) Handler() http.Handler {
 	// Prometheus/VictoriaMetrics scrape endpoint. Left un-instrumented to avoid
 	// the scraper polluting the API latency histograms.
 	if s.metrics != nil {
-		mux.Handle("/metrics", s.metrics.handler())
+		mux.HandleFunc("/metrics", s.handleMetrics)
 	}
 	wrapped := s.withCORS(gzipMiddleware(mux))
 	if s.hub == nil {
@@ -122,6 +123,65 @@ type networkSummary struct {
 	AnalyzersTotal     int     `json:"analyzersTotal"`
 	AnalyzersConnected int     `json:"analyzersConnected"`
 	LastPacketAt       int64   `json:"lastPacketAt"`
+}
+
+type statsResponse struct {
+	Nodes  statsNodeCounts `json:"nodes"`
+	SQLite *SQLiteStats    `json:"sqlite,omitempty"`
+}
+
+type statsNodeCounts struct {
+	Live     int `json:"live"`
+	Imported int `json:"imported"`
+	Total    int `json:"total"`
+}
+
+func (s *Server) statsSnapshot() (statsResponse, error) {
+	liveNodes := 0
+	if s.nodes != nil {
+		liveNodes = s.nodes.Count()
+	}
+	importedNodes := 0
+	if s.imported != nil {
+		importedNodes = s.imported.Len()
+	}
+	out := statsResponse{
+		Nodes: statsNodeCounts{
+			Live:     liveNodes,
+			Imported: importedNodes,
+			Total:    liveNodes + importedNodes,
+		},
+	}
+	if s.db != nil {
+		sqlite, err := s.db.Stats()
+		if err != nil {
+			return out, err
+		}
+		out.SQLite = &sqlite
+	}
+	return out, nil
+}
+
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := s.statsSnapshot()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
+		return
+	}
+	w.Header().Set("Cache-Control", "public, max-age=15")
+	writeJSON(w, http.StatusOK, stats)
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if s.metrics == nil {
+		http.NotFound(w, r)
+		return
+	}
+	stats, err := s.statsSnapshot()
+	if err == nil {
+		s.metrics.updateStorageStats(stats.Nodes.Live, stats.Nodes.Imported, stats.SQLite)
+	}
+	s.metrics.handler().ServeHTTP(w, r)
 }
 
 type analyzerDetail struct {
