@@ -23,3 +23,9 @@ observer_persist_interval = "12s"
 
 import_url = "https://map.meshcore.io/api/v1/nodes?binary=0&short=0"
 import_interval = "1h"
+
+# Versioned full-map snapshots, zstd-compressed, written every interval.
+# snapshot_base_url is prepended to snapshot URLs in latest.json (no trailing slash).
+snapshot_dir = "snapshots"
+snapshot_base_url = "https://api.meshcore.ninja"
+snapshot_interval = "5m"
