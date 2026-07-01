@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -22,6 +23,10 @@ type Server struct {
 	metrics     *Metrics
 	hub         *Hub
 	allowOrigin string
+
+	statsMu       sync.Mutex
+	statsCached   statsResponse
+	statsCachedAt time.Time
 }
 
 func NewServer(store *Store, nodes *NodeRegistry, observers *ObserverRegistry, links *LinkRegistry, imported *ImportRegistry, db *DB, metrics *Metrics, hub *Hub, allowOrigin string) *Server {
@@ -126,8 +131,9 @@ type networkSummary struct {
 }
 
 type statsResponse struct {
-	Nodes  statsNodeCounts `json:"nodes"`
-	SQLite *SQLiteStats    `json:"sqlite,omitempty"`
+	Nodes     statsNodeCounts `json:"nodes"`
+	Directory directoryStats  `json:"directory"`
+	SQLite    *SQLiteStats    `json:"sqlite,omitempty"`
 }
 
 type statsNodeCounts struct {
@@ -136,14 +142,66 @@ type statsNodeCounts struct {
 	Total    int `json:"total"`
 }
 
+type directoryStats struct {
+	Total     int                  `json:"total"`
+	Sources   directorySourceStats `json:"sources"`
+	Types     directoryTypeStats   `json:"types"`
+	Freshness directoryFreshStats  `json:"freshness"`
+	Data      directoryDataStats   `json:"data"`
+}
+
+type directorySourceStats struct {
+	Advert    int `json:"advert"`
+	Map       int `json:"map"`
+	CoreScope int `json:"corescope"`
+}
+
+type directoryTypeStats struct {
+	Unknown   int `json:"unknown"`
+	Companion int `json:"companion"`
+	Repeater  int `json:"repeater"`
+	Room      int `json:"room"`
+	Sensor    int `json:"sensor"`
+}
+
+type directoryFreshStats struct {
+	Last24h      int `json:"last24h"`
+	Last7d       int `json:"last7d"`
+	OlderThan30d int `json:"olderThan30d"`
+}
+
+type directoryDataStats struct {
+	WithLocation int `json:"withLocation"`
+	WithName     int `json:"withName"`
+}
+
+const statsCacheTTL = 15 * time.Second
+
 func (s *Server) statsSnapshot() statsResponse {
+	now := time.Now()
+	s.statsMu.Lock()
+	if !s.statsCachedAt.IsZero() && now.Sub(s.statsCachedAt) < statsCacheTTL {
+		out := s.statsCached
+		s.statsMu.Unlock()
+		return out
+	}
+	s.statsMu.Unlock()
+
 	liveNodes := 0
+	var directory directoryStats
+	seen := map[string]struct{}{}
 	if s.nodes != nil {
 		liveNodes = s.nodes.Count()
+		directory.Sources.Advert = liveNodes
+		directory.Sources.CoreScope = liveNodes
+		addLiveDirectoryStats(s.nodes, &directory, seen, nowUnix())
 	}
 	importedNodes := 0
 	if s.imported != nil {
-		importedNodes = s.imported.Len()
+		records := s.imported.Records()
+		importedNodes = len(records)
+		directory.Sources.Map = importedNodes
+		addImportedDirectoryStats(records, &directory, seen, nowUnix())
 	}
 	out := statsResponse{
 		Nodes: statsNodeCounts{
@@ -151,12 +209,70 @@ func (s *Server) statsSnapshot() statsResponse {
 			Imported: importedNodes,
 			Total:    liveNodes + importedNodes,
 		},
+		Directory: directory,
 	}
 	if s.db != nil {
 		sqlite := s.db.Stats()
 		out.SQLite = &sqlite
 	}
+	s.statsMu.Lock()
+	s.statsCached = out
+	s.statsCachedAt = now
+	s.statsMu.Unlock()
 	return out
+}
+
+func addLiveDirectoryStats(r *NodeRegistry, stats *directoryStats, seen map[string]struct{}, now int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for pubkey, n := range r.nodes {
+		seen[pubkey] = struct{}{}
+		addDirectoryNode(stats, byte(n.NodeType), n.LastAdvertAt, n.HasGPS, n.Name, now)
+	}
+}
+
+func addImportedDirectoryStats(records []*ImportedNode, stats *directoryStats, seen map[string]struct{}, now int64) {
+	for _, n := range records {
+		if n == nil {
+			continue
+		}
+		if _, exists := seen[n.PublicKey]; exists {
+			continue
+		}
+		seen[n.PublicKey] = struct{}{}
+		addDirectoryNode(stats, byte(n.Type), n.lastAdvertUnix(), n.hasCoords(), n.AdvName, now)
+	}
+}
+
+func addDirectoryNode(stats *directoryStats, typ byte, lastSeen int64, hasLocation bool, name string, now int64) {
+	stats.Total++
+	switch typ {
+	case 1:
+		stats.Types.Companion++
+	case 2:
+		stats.Types.Repeater++
+	case 3:
+		stats.Types.Room++
+	case 4:
+		stats.Types.Sensor++
+	default:
+		stats.Types.Unknown++
+	}
+	if lastSeen >= now-int64((24*time.Hour).Seconds()) {
+		stats.Freshness.Last24h++
+	}
+	if lastSeen >= now-int64((7*24*time.Hour).Seconds()) {
+		stats.Freshness.Last7d++
+	}
+	if lastSeen <= now-int64((30*24*time.Hour).Seconds()) {
+		stats.Freshness.OlderThan30d++
+	}
+	if hasLocation {
+		stats.Data.WithLocation++
+	}
+	if strings.TrimSpace(name) != "" {
+		stats.Data.WithName++
+	}
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {

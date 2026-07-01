@@ -63,6 +63,18 @@ func TestStatsAPIAndMetrics(t *testing.T) {
 	if stats.Nodes.Live != 2 || stats.Nodes.Imported != 3 || stats.Nodes.Total != 5 {
 		t.Fatalf("node stats = %+v, want live=2 imported=3 total=5", stats.Nodes)
 	}
+	if stats.Directory.Total != 4 {
+		t.Fatalf("directory total = %d, want 4 merged unique nodes", stats.Directory.Total)
+	}
+	if stats.Directory.Sources.Advert != 2 || stats.Directory.Sources.Map != 3 || stats.Directory.Sources.CoreScope != 2 {
+		t.Fatalf("directory sources = %+v, want advert=2 map=3 corescope=2", stats.Directory.Sources)
+	}
+	if stats.Directory.Types.Unknown != 4 {
+		t.Fatalf("directory types = %+v, want 4 unknown", stats.Directory.Types)
+	}
+	if stats.Directory.Freshness.OlderThan30d != 4 {
+		t.Fatalf("directory freshness = %+v, want all older than 30d", stats.Directory.Freshness)
+	}
 	if stats.SQLite == nil || stats.SQLite.Nodes != 1 || stats.SQLite.ImportedNodes != 3 || stats.SQLite.Adverts != 2 || stats.SQLite.ImportedNodeHistory != 2 {
 		t.Fatalf("sqlite stats = %+v, want nodes=1 imported=3 adverts=2 imported_history=2", stats.SQLite)
 	}

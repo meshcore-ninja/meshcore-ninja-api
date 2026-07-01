@@ -196,8 +196,10 @@ sqlite3 core.db ".read /path/to/meshcore-ninja-api/scripts/migrate_links_to_link
 ## Endpoints
 
 - `GET /api/health` — `{ok, networks, analyzers, analyzersConnected, time}`
-- `GET /api/stats` — current registry and storage counts:
-  `{nodes: {live, imported, total}, sqlite: {nodes, importedNodes, adverts, importedNodeHistory}}`
+- `GET /api/stats` — current registry, directory overview, and storage counts:
+  `{nodes, directory: {total, sources, types, freshness, data}, sqlite}`.
+  `directory.sources` can overlap, while the other directory counts use the
+  merged unique live+map directory view.
 - `GET /api/networks` — `{networks: [networkSummary]}` — used by the Networks list.
 - `GET /api/networks/{id}` — network detail with `payloadTypes` and a per-analyzer
   breakdown — used by the network detail page.
