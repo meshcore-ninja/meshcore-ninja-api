@@ -47,6 +47,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/nodes/", s.instrument("/api/nodes/:pubkey", s.handleNodeSub))
 	mux.HandleFunc("/api/search/options", s.instrument("/api/search/options", s.handleSearchOptions))
 	mux.HandleFunc("/api/search", s.instrument("/api/search", s.handleSearch))
+	mux.HandleFunc("/api/prefixes", s.instrument("/api/prefixes", s.handlePrefixes))
 	mux.HandleFunc("/api/route", s.instrument("/api/route", s.handleRoute))
 	mux.HandleFunc("/api/observers", s.instrument("/api/observers", s.handleObservers))
 	mux.HandleFunc("/api/flags", s.instrument("/api/flags", s.handleFlags))
