@@ -137,16 +137,19 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 // --- response shapes ---
 
 type networkSummary struct {
-	ID                 string  `json:"id"`
-	Name               string  `json:"name"`
-	PktPerMin          float64 `json:"pktPerMin"`
-	UniquePackets      uint64  `json:"uniquePackets"`
-	Observations       uint64  `json:"observations"`
-	Observers          int     `json:"observers"`
-	Nodes              int     `json:"nodes"`
-	AnalyzersTotal     int     `json:"analyzersTotal"`
-	AnalyzersConnected int     `json:"analyzersConnected"`
-	LastPacketAt       int64   `json:"lastPacketAt"`
+	ID                 string         `json:"id"`
+	Name               string         `json:"name"`
+	PktPerMin          float64        `json:"pktPerMin"`
+	UniquePackets      uint64         `json:"uniquePackets"`
+	Observations       uint64         `json:"observations"`
+	Observers          int            `json:"observers"`
+	Nodes              int            `json:"nodes"`
+	TotalNodes         int            `json:"totalNodes"`
+	NodesOnMap         int            `json:"nodesOnMap"`
+	NodesByType        map[string]int `json:"nodesByType,omitempty"`
+	AnalyzersTotal     int            `json:"analyzersTotal"`
+	AnalyzersConnected int            `json:"analyzersConnected"`
+	LastPacketAt       int64          `json:"lastPacketAt"`
 }
 
 type statsResponse struct {
@@ -331,7 +334,11 @@ type networkDetail struct {
 	Analyzers    []analyzerDetail  `json:"analyzers"`
 }
 
-func (s *Server) summaryFor(ns *NetworkState, now int64) networkSummary {
+// summaryFor builds a network's live summary. nodeStats is the network's
+// registry membership breakdown (nil when the registry is disabled or the
+// network has no known nodes), passed in so a whole-list response can tally
+// every network in a single pass.
+func (s *Server) summaryFor(ns *NetworkState, now int64, nodeStats *NetworkNodeStats) networkSummary {
 	snap := ns.Counter.Snapshot(now)
 	connected := 0
 	for _, a := range ns.Analyzers {
@@ -339,7 +346,7 @@ func (s *Server) summaryFor(ns *NetworkState, now int64) networkSummary {
 			connected++
 		}
 	}
-	return networkSummary{
+	sum := networkSummary{
 		ID:                 ns.ID,
 		Name:               ns.Name,
 		PktPerMin:          snap.PktPerMin,
@@ -351,14 +358,24 @@ func (s *Server) summaryFor(ns *NetworkState, now int64) networkSummary {
 		AnalyzersConnected: connected,
 		LastPacketAt:       snap.LastPacketAt,
 	}
+	if nodeStats != nil {
+		sum.TotalNodes = nodeStats.Total
+		sum.NodesOnMap = nodeStats.OnMap
+		sum.NodesByType = nodeStats.ByType
+	}
+	return sum
 }
 
 func (s *Server) handleNetworks(w http.ResponseWriter, r *http.Request) {
 	now := nowUnix()
 	networks := s.store.NetworksSnapshot()
+	var stats map[string]*NetworkNodeStats
+	if s.nodes != nil {
+		stats = s.nodes.NodeStatsByNetwork()
+	}
 	out := make([]networkSummary, 0, len(networks))
 	for _, ns := range networks {
-		out = append(out, s.summaryFor(ns, now))
+		out = append(out, s.summaryFor(ns, now, stats[ns.ID]))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"networks": out})
 }
@@ -373,6 +390,10 @@ func (s *Server) handleNetworkDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	now := nowUnix()
 	netSnap := ns.Counter.Snapshot(now)
+	var nodeStats *NetworkNodeStats
+	if s.nodes != nil {
+		nodeStats = s.nodes.NodeStatsByNetwork()[id]
+	}
 
 	analyzers := make([]analyzerDetail, 0, len(ns.Analyzers))
 	for _, a := range ns.Analyzers {
@@ -395,7 +416,7 @@ func (s *Server) handleNetworkDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, networkDetail{
-		networkSummary: s.summaryFor(ns, now),
+		networkSummary: s.summaryFor(ns, now, nodeStats),
 		PayloadTypes:   netSnap.PayloadTypes,
 		Analyzers:      analyzers,
 	})

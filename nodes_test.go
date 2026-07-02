@@ -262,3 +262,36 @@ func TestRegistryTakeDirtyAndRequeue(t *testing.T) {
 		t.Fatalf("dirty after retry take = %d, want 0", len(dirty))
 	}
 }
+
+func TestNodeStatsByNetwork(t *testing.T) {
+	reg := newNodeRegistry(defaultAdvertsPerNode)
+
+	// cz: a located repeater, a located companion (chat), a located repeater that
+	// gets location-flagged, and a repeater with no GPS. sk: one located sensor.
+	reg.Observe(AdvertObservation{PubKey: "a1", NodeType: 2, HasGPS: true, NetworkID: "cz", At: 1})
+	reg.Observe(AdvertObservation{PubKey: "a2", NodeType: 1, HasGPS: true, NetworkID: "cz", At: 1})
+	reg.Observe(AdvertObservation{PubKey: "a3", NodeType: 2, HasGPS: true, NetworkID: "cz", At: 1})
+	reg.Observe(AdvertObservation{PubKey: "a4", NodeType: 2, HasGPS: false, NetworkID: "cz", At: 1})
+	reg.Observe(AdvertObservation{PubKey: "b1", NodeType: 4, HasGPS: true, NetworkID: "sk", At: 1})
+
+	// a3 is far from its network — excluded from the on-map tallies but still counted in the total.
+	reg.ApplyFlags(map[string][]string{"a3": {FlagFarFromNetwork}})
+
+	stats := reg.NodeStatsByNetwork()
+	cz := stats["cz"]
+	if cz == nil {
+		t.Fatal("missing cz stats")
+	}
+	if cz.Total != 4 {
+		t.Errorf("cz Total = %d, want 4", cz.Total)
+	}
+	if cz.OnMap != 2 {
+		t.Errorf("cz OnMap = %d, want 2 (a3 flagged, a4 no GPS)", cz.OnMap)
+	}
+	if cz.ByType["repeater"] != 1 || cz.ByType["chat"] != 1 {
+		t.Errorf("cz ByType = %v, want repeater:1 chat:1", cz.ByType)
+	}
+	if sk := stats["sk"]; sk == nil || sk.Total != 1 || sk.OnMap != 1 || sk.ByType["sensor"] != 1 {
+		t.Errorf("sk stats = %+v, want total/onmap 1 sensor 1", sk)
+	}
+}

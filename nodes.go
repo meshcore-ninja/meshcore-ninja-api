@@ -219,6 +219,44 @@ func (r *NodeRegistry) Count() int {
 	return len(r.nodes)
 }
 
+// NetworkNodeStats summarizes a network's registry membership. Total counts
+// every node ever heard on the network (the all-time figure the prefix finder
+// reports as "nodes counted"); OnMap counts only those the map actually plots —
+// a valid GPS fix and no location flag; ByType breaks the OnMap set down by node
+// type name (repeater/chat/room/sensor), matching the map popup's per-type
+// tallies. All are distinct from the live, windowed node gauge on each network's
+// packet counter.
+type NetworkNodeStats struct {
+	Total  int            `json:"total"`
+	OnMap  int            `json:"onMap"`
+	ByType map[string]int `json:"byType"`
+}
+
+// NodeStatsByNetwork tallies per-network membership in a single pass over the
+// registry, counting a node once per network it has been heard on.
+func (r *NodeRegistry) NodeStatsByNetwork() map[string]*NetworkNodeStats {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string]*NetworkNodeStats)
+	for _, n := range r.nodes {
+		onMap := n.HasGPS && !locationFlagged(n.Flags)
+		typeName := nodeTypeName(n.NodeType)
+		for _, id := range n.Networks {
+			st := out[id]
+			if st == nil {
+				st = &NetworkNodeStats{ByType: make(map[string]int)}
+				out[id] = st
+			}
+			st.Total++
+			if onMap {
+				st.OnMap++
+				st.ByType[typeName]++
+			}
+		}
+	}
+	return out
+}
+
 // PositionOf returns a node's last known GPS position by pubkey (lowercase hex).
 // ok is false when the node is unknown or has no GPS. A lean helper for link
 // position stamping — it copies no slices and takes the lock only briefly.
