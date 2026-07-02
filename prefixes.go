@@ -12,9 +12,9 @@ import (
 // for a network at a chosen prefix width, so the tools.meshcore.ninja Prefix
 // Finder can compute conflicts over every matching node rather than a sample.
 //
-//	GET /api/prefixes?networks=<id>&bytes=1|2|3&near=<lat,lon>&radius=<km>&types=
+//	GET /api/prefixes?networks=<id>|global&bytes=1|2|3&near=<lat,lon>&radius=<km>&types=
 //
-// `networks` is required (occupancy is only meaningful within one mesh). `bytes`
+// Omit `networks` or pass `networks=global` to count every known node. `bytes`
 // is the prefix width in bytes (1 = the MeshCore routing prefix), clamped 1..3.
 
 const maxPrefixBytes = 3
@@ -42,11 +42,8 @@ func (s *Server) handlePrefixes(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": bad})
 		return
 	}
-	// Occupancy is scoped to a single mesh; require at least one network so we
-	// never dump the whole global registry.
-	if len(p.Networks) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "networks parameter is required"})
-		return
+	if prefixGlobalNetwork(p.Networks) {
+		p.Networks = nil
 	}
 
 	bytes := atoiDefault(r.URL.Query().Get("bytes"), 1)
@@ -121,3 +118,13 @@ func (s *Server) handlePrefixes(w http.ResponseWriter, r *http.Request) {
 
 // maxInt is a large sentinel limit meaning "return every matching node".
 const maxInt = int(^uint(0) >> 1)
+
+func prefixGlobalNetwork(networks map[string]bool) bool {
+	for id := range networks {
+		switch strings.ToLower(strings.TrimSpace(id)) {
+		case "global", "all", "*":
+			return true
+		}
+	}
+	return false
+}

@@ -13,6 +13,7 @@ func prefixTestServer() *Server {
 	r.Observe(AdvertObservation{PubKey: "25aa01", Name: "Alpha", At: 100, NetworkID: "net"})
 	r.Observe(AdvertObservation{PubKey: "25bb02", Name: "Beta", At: 200, NetworkID: "net"})
 	r.Observe(AdvertObservation{PubKey: "ff9901", Name: "Gamma", At: 300, NetworkID: "net"})
+	r.Observe(AdvertObservation{PubKey: "25cc03", Name: "Delta", At: 400, NetworkID: "other"})
 	return &Server{nodes: r}
 }
 
@@ -75,13 +76,42 @@ func TestHandlePrefixesTwoBytes(t *testing.T) {
 	}
 }
 
-// TestHandlePrefixesRequiresNetwork rejects a request that omits networks.
-func TestHandlePrefixesRequiresNetwork(t *testing.T) {
+// TestHandlePrefixesGlobalOmittedNetwork counts every matching node when the
+// network filter is omitted.
+func TestHandlePrefixesGlobalOmittedNetwork(t *testing.T) {
 	s := prefixTestServer()
 	req := httptest.NewRequest(http.MethodGet, "/api/prefixes?bytes=1", nil)
 	rr := httptest.NewRecorder()
 	s.handlePrefixes(rr, req)
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rr.Code)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	var body prefixResp
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Counted != 4 || body.Used != 2 || body.Collisions != 2 {
+		t.Fatalf("got counted=%d used=%d collisions=%d, want 4/2/2",
+			body.Counted, body.Used, body.Collisions)
+	}
+}
+
+// TestHandlePrefixesGlobalSentinel treats networks=global as an explicit
+// request for the all-node histogram.
+func TestHandlePrefixesGlobalSentinel(t *testing.T) {
+	s := prefixTestServer()
+	req := httptest.NewRequest(http.MethodGet, "/api/prefixes?networks=global&bytes=1", nil)
+	rr := httptest.NewRecorder()
+	s.handlePrefixes(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	var body prefixResp
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Counted != 4 || body.Used != 2 || body.Collisions != 2 {
+		t.Fatalf("got counted=%d used=%d collisions=%d, want 4/2/2",
+			body.Counted, body.Used, body.Collisions)
 	}
 }
