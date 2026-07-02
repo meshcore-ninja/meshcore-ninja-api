@@ -36,7 +36,7 @@ type prefixResp struct {
 // nodes together and reports one collision.
 func TestHandlePrefixesOneByte(t *testing.T) {
 	s := prefixTestServer()
-	req := httptest.NewRequest(http.MethodGet, "/api/prefixes?networks=net&bytes=1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/prefixes?networks=net&bytes=1&details=1", nil)
 	rr := httptest.NewRecorder()
 	s.handlePrefixes(rr, req)
 	if rr.Code != http.StatusOK {

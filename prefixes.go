@@ -20,7 +20,9 @@ import (
 const maxPrefixBytes = 3
 
 // prefixNode is the lightweight per-node payload carried under each prefix — just
-// enough for the UI to name a conflict, without the heavy advert list.
+// enough for the UI to name a conflict, without the heavy advert list. It is only
+// included when the caller passes details=1, since a whole-network dump of every
+// node is large; by default the histogram is counts-only so it loads fast.
 type prefixNode struct {
 	PubKey   string `json:"pubkey"`
 	Name     string `json:"name"`
@@ -31,7 +33,7 @@ type prefixNode struct {
 type prefixBucket struct {
 	Prefix string       `json:"prefix"`
 	Count  int          `json:"count"`
-	Nodes  []prefixNode `json:"nodes"`
+	Nodes  []prefixNode `json:"nodes,omitempty"`
 }
 
 func (s *Server) handlePrefixes(w http.ResponseWriter, r *http.Request) {
@@ -55,6 +57,9 @@ func (s *Server) handlePrefixes(w http.ResponseWriter, r *http.Request) {
 		bytes = maxPrefixBytes
 	}
 	hexLen := bytes * 2
+	// details=1 attaches the node list to each prefix (heavier); by default we
+	// return counts only so the map loads fast even on large networks.
+	withNodes := r.URL.Query().Get("details") == "1"
 
 	// No cap: rank every matching node so the histogram is complete.
 	results, _, _ := s.mergedSearch(p, maxInt)
@@ -74,12 +79,14 @@ func (s *Server) handlePrefixes(w http.ResponseWriter, r *http.Request) {
 			buckets[key] = b
 		}
 		b.Count++
-		b.Nodes = append(b.Nodes, prefixNode{
-			PubKey:   res.PubKey,
-			Name:     res.Name,
-			Type:     res.Type,
-			TypeName: res.TypeName,
-		})
+		if withNodes {
+			b.Nodes = append(b.Nodes, prefixNode{
+				PubKey:   res.PubKey,
+				Name:     res.Name,
+				Type:     res.Type,
+				TypeName: res.TypeName,
+			})
+		}
 	}
 
 	out := make([]prefixBucket, 0, len(buckets))

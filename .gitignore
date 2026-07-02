@@ -2,6 +2,7 @@
 /meshcore-ninja-api
 *.exe
 /data
+/snapshots
 
 # Local runtime configuration. Copy config.example.toml to config.toml.
 /config.toml
