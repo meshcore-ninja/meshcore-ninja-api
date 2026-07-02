@@ -44,19 +44,28 @@ func newObserverRegistry() *ObserverRegistry {
 	}
 }
 
+// canonObserverID normalizes an observer id (a node public key) to the lowercase
+// hex form used as the canonical key everywhere else. Analyzers report observer
+// ids in upper case, so without this the registry would key rows under a form
+// that never matches a node's (lower-cased) pubkey — leaving isObserver false.
+func canonObserverID(id string) string {
+	return strings.ToLower(strings.TrimSpace(id))
+}
+
 // Observe records one observer report: upserts the row, advances last-seen and
 // the report count, and adds the network to the observer's set.
 func (r *ObserverRegistry) Observe(a ObserverActivity) {
-	if a.ObserverID == "" {
+	id := canonObserverID(a.ObserverID)
+	if id == "" {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	o := r.observers[a.ObserverID]
+	o := r.observers[id]
 	if o == nil {
-		o = &ObserverRecord{ObserverID: a.ObserverID, FirstSeen: a.At}
-		r.observers[a.ObserverID] = o
+		o = &ObserverRecord{ObserverID: id, FirstSeen: a.At}
+		r.observers[id] = o
 	}
 	if a.Name != "" {
 		o.Name = a.Name
@@ -66,7 +75,7 @@ func (r *ObserverRegistry) Observe(a ObserverActivity) {
 	if a.NetworkID != "" && !containsStr(o.Networks, a.NetworkID) {
 		o.Networks = append(o.Networks, a.NetworkID)
 	}
-	r.dirty[a.ObserverID] = struct{}{}
+	r.dirty[id] = struct{}{}
 }
 
 // ObserverView is the JSON shape served by the API.
@@ -104,16 +113,13 @@ func (r *ObserverRegistry) Snapshot() []ObserverView {
 }
 
 func (r *ObserverRegistry) Lookup(observerID string) (ObserverView, bool) {
-	observerID = strings.TrimSpace(observerID)
+	observerID = canonObserverID(observerID)
 	if observerID == "" {
 		return ObserverView{}, false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	o := r.observers[observerID]
-	if o == nil {
-		o = r.observers[strings.ToLower(observerID)]
-	}
 	if o == nil {
 		return ObserverView{}, false
 	}
@@ -170,8 +176,9 @@ func (r *ObserverRegistry) Requeue(records []ObserverRecord) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i := range records {
-		if _, exists := r.observers[records[i].ObserverID]; exists {
-			r.dirty[records[i].ObserverID] = struct{}{}
+		id := canonObserverID(records[i].ObserverID)
+		if _, exists := r.observers[id]; exists {
+			r.dirty[id] = struct{}{}
 		}
 	}
 }
@@ -183,6 +190,36 @@ func (r *ObserverRegistry) Restore(observers []ObserverRecord) {
 	defer r.mu.Unlock()
 	for i := range observers {
 		o := observers[i]
-		r.observers[o.ObserverID] = &o
+		o.ObserverID = canonObserverID(o.ObserverID)
+		if o.ObserverID == "" {
+			continue
+		}
+		// Persisted rows predating id canonicalization may be upper-cased; merge any
+		// duplicates that collapse to the same canonical key so counts stay correct.
+		if existing := r.observers[o.ObserverID]; existing != nil {
+			mergeObserver(existing, &o)
+		} else {
+			r.observers[o.ObserverID] = &o
+		}
+	}
+}
+
+// mergeObserver folds src into dst, keeping the widest activity window, summed
+// observations, a non-empty name, and the union of networks.
+func mergeObserver(dst, src *ObserverRecord) {
+	if src.FirstSeen != 0 && (dst.FirstSeen == 0 || src.FirstSeen < dst.FirstSeen) {
+		dst.FirstSeen = src.FirstSeen
+	}
+	if src.LastSeen > dst.LastSeen {
+		dst.LastSeen = src.LastSeen
+	}
+	dst.Observations += src.Observations
+	if dst.Name == "" {
+		dst.Name = src.Name
+	}
+	for _, net := range src.Networks {
+		if !containsStr(dst.Networks, net) {
+			dst.Networks = append(dst.Networks, net)
+		}
 	}
 }

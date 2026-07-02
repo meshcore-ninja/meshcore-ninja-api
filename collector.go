@@ -64,6 +64,10 @@ func (c *Collector) handle(data []byte) {
 		c.metrics.recordDecodeError("empty_hash")
 		return
 	}
+	// Analyzers report observer ids in upper case, but node pubkeys are lower-cased
+	// everywhere else. Canonicalize once here so the observer registry, stored
+	// adverts, and link paths all key on the same form (else isObserver is false).
+	p.ObserverID = strings.ToLower(strings.TrimSpace(p.ObserverID))
 	typeName := ""
 	if p.PayloadType != nil {
 		typeName = meshpkt.PayloadType(byte(*p.PayloadType)).String()

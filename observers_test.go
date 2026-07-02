@@ -5,6 +5,48 @@ import (
 	"testing"
 )
 
+// TestObserverRegistryCanonicalizesID guards the isObserver bug: analyzers report
+// observer ids in upper case, but node pubkeys are lower-cased everywhere, so a
+// self-observing node must still be found by its lower-case pubkey.
+func TestObserverRegistryCanonicalizesID(t *testing.T) {
+	reg := newObserverRegistry()
+	reg.Observe(ObserverActivity{ObserverID: "A5A5A5A2FFF0715D", Name: "Owl", NetworkID: "net", At: 100})
+
+	if _, ok := reg.Lookup("a5a5a5a2fff0715d"); !ok {
+		t.Fatal("Lookup by lower-case pubkey failed; observer keyed under upper-case id")
+	}
+	if snap := reg.Snapshot(); len(snap) != 1 || snap[0].ObserverID != "a5a5a5a2fff0715d" {
+		t.Fatalf("snapshot = %+v, want single lower-cased observer id", snap)
+	}
+
+	// A second report with different casing must fold into the same row.
+	reg.Observe(ObserverActivity{ObserverID: "a5a5a5a2fff0715d", NetworkID: "net", At: 200})
+	if snap := reg.Snapshot(); len(snap) != 1 || snap[0].Observations != 2 {
+		t.Fatalf("snapshot = %+v, want one row with 2 observations", snap)
+	}
+}
+
+// TestObserverRegistryRestoreMergesLegacyCasing covers persisted rows that predate
+// canonicalization: an upper-cased row and its lower-cased twin must merge.
+func TestObserverRegistryRestoreMergesLegacyCasing(t *testing.T) {
+	reg := newObserverRegistry()
+	reg.Restore([]ObserverRecord{
+		{ObserverID: "ABCD", Name: "Legacy", FirstSeen: 100, LastSeen: 150, Observations: 3, Networks: []string{"net-a"}},
+		{ObserverID: "abcd", FirstSeen: 90, LastSeen: 200, Observations: 2, Networks: []string{"net-b"}},
+	})
+	snap := reg.Snapshot()
+	if len(snap) != 1 {
+		t.Fatalf("observers = %d, want 1 (merged)", len(snap))
+	}
+	o := snap[0]
+	if o.ObserverID != "abcd" || o.FirstSeen != 90 || o.LastSeen != 200 || o.Observations != 5 {
+		t.Fatalf("merged = %+v, want abcd first=90 last=200 obs=5", o)
+	}
+	if len(o.Networks) != 2 {
+		t.Errorf("networks = %v, want union of both rows", o.Networks)
+	}
+}
+
 func TestObserverRegistryObserve(t *testing.T) {
 	reg := newObserverRegistry()
 
