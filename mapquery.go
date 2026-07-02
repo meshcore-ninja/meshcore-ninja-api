@@ -42,6 +42,7 @@ type MapParams struct {
 	HasNear     bool
 	Sort        string
 	Q           string // name substring (case-insensitive) or pubkey hex prefix
+	PrefixOnly  bool   // when set, Q matches a pubkey hex prefix only (name ignored)
 	Limit       int    // max individual node features (<=0 = default)
 	All         bool   // return every matching node (no bbox, no clustering)
 }
@@ -207,7 +208,11 @@ func (p MapParams) matchesImported(n *ImportedNode) bool {
 	}
 	if p.Q != "" {
 		q := strings.ToLower(p.Q)
-		if !strings.Contains(strings.ToLower(n.AdvName), q) && !strings.HasPrefix(n.PublicKey, q) {
+		if p.PrefixOnly {
+			if !strings.HasPrefix(n.PublicKey, q) {
+				return false
+			}
+		} else if !strings.Contains(strings.ToLower(n.AdvName), q) && !strings.HasPrefix(n.PublicKey, q) {
 			return false
 		}
 	}
@@ -266,7 +271,11 @@ func (p MapParams) matches(n *NodeRecord) bool {
 	}
 	if p.Q != "" {
 		q := strings.ToLower(p.Q)
-		if !strings.Contains(strings.ToLower(n.Name), q) && !strings.HasPrefix(n.PubKey, q) {
+		if p.PrefixOnly {
+			if !strings.HasPrefix(n.PubKey, q) {
+				return false
+			}
+		} else if !strings.Contains(strings.ToLower(n.Name), q) && !strings.HasPrefix(n.PubKey, q) {
 			return false
 		}
 	}

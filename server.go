@@ -920,6 +920,27 @@ func (s *Server) supportedSearchMeta() (map[string]bool, map[string]bool) {
 	return countries, regions
 }
 
+// caretPrefixQuery recognises the "^<hex>" pubkey-prefix syntax. It returns the
+// lower-cased hex prefix (without the caret) and true when q is a caret followed
+// by at least two hex digits; otherwise ok is false and q should be treated as a
+// normal name/pubkey query.
+func caretPrefixQuery(q string) (string, bool) {
+	if !strings.HasPrefix(q, "^") {
+		return "", false
+	}
+	hexPart := strings.ToLower(q[1:])
+	if len(hexPart) < 2 {
+		return "", false
+	}
+	for i := 0; i < len(hexPart); i++ {
+		c := hexPart[i]
+		if !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') {
+			return "", false
+		}
+	}
+	return hexPart, true
+}
+
 func parseSearchParams(s *Server, r *http.Request) (MapParams, int, string) {
 	qv := r.URL.Query()
 	p := MapParams{
@@ -927,6 +948,13 @@ func parseSearchParams(s *Server, r *http.Request) (MapParams, int, string) {
 		Networks: parseStringSet(qv.Get("networks")),
 		Q:        strings.TrimSpace(qv.Get("q")),
 		Sort:     strings.TrimSpace(qv.Get("sort")),
+	}
+
+	// A "^<hex>" query is a pubkey-prefix search (min 2 hex chars): match only
+	// nodes whose public key starts with <hex>, ignoring name matches.
+	if hex, ok := caretPrefixQuery(p.Q); ok {
+		p.Q = hex
+		p.PrefixOnly = true
 	}
 
 	for _, typ := range qv["type"] {
