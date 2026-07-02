@@ -101,10 +101,12 @@ func (c *Collector) handle(data []byte) {
 			Path:      pathWithObserverReceiver(p.ResolvedPath, p.ObserverID),
 			Now:       now,
 		}
+		recordLinks := true
 		if raw := decodeRawHex(p.RawHex); len(raw) > 0 {
 			obs.RouteType = routeTypeName(raw[0])
 			if pkt, err := meshpkt.DecodePacket(raw); err == nil {
 				obs.LowConfidence = pkt.PathHashSize == 1 && pkt.HopCount() > 0
+				recordLinks = shouldRecordLinkObservation(pkt)
 				if pkt.Type == meshpkt.PayloadTrace {
 					obs.SNRs = meshpkt.TraceSNRs(pkt.Path)
 				}
@@ -113,7 +115,9 @@ func (c *Collector) handle(data []byte) {
 		if c.nodes != nil {
 			obs.PosOf = c.nodes.PositionOf
 		}
-		c.links.ObservePathCtx(obs)
+		if recordLinks {
+			c.links.ObservePathCtx(obs)
+		}
 	}
 
 	// ADVERT packets carry node identity. Decode the wire bytes locally and feed
@@ -164,6 +168,15 @@ func routeTypeName(header byte) string {
 	default:
 		return ""
 	}
+}
+
+// shouldRecordLinkObservation rejects packet paths that are too ambiguous to
+// build the link graph from. A 1-byte per-hop hash has only 256 possible values;
+// on multi-hop non-TRACE packets this can resolve to plausible-looking but bogus
+// long paths and pollute neighbor tables. TRACE still uses 1-byte path entries by
+// design for its SNR accumulator, so it remains eligible.
+func shouldRecordLinkObservation(pkt meshpkt.Packet) bool {
+	return pkt.Type == meshpkt.PayloadTrace || pkt.PathHashSize != 1 || pkt.HopCount() <= 1
 }
 
 // collectAdvert decodes an ADVERT's raw wire bytes and records the node. Bad or
