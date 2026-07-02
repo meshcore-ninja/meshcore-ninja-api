@@ -248,8 +248,15 @@ sqlite3 core.db ".read /path/to/meshcore-ninja-api/scripts/migrate_links_to_link
   `directory.sources` can overlap, while the other directory counts use the
   merged unique live+map directory view.
 - `GET /api/networks` — `{networks: [networkSummary]}` — used by the Networks list.
+  Each summary carries the live packet/observer/node gauges plus registry
+  membership: `totalNodes` (every node ever heard on the network — the same
+  figure the prefix finder counts), `nodesOnMap` (only those the map plots: a GPS
+  fix and no location flag), and `nodesByType` (the on-map set split by type name,
+  e.g. `{repeater, chat, room, sensor}`). The live `nodes` field remains the
+  windowed "active recently" gauge.
 - `GET /api/networks/{id}` — network detail with `payloadTypes` and a per-analyzer
-  breakdown — used by the network detail page.
+  breakdown — used by the network detail page. Carries the same node fields as the
+  list summary.
 - `GET /api/nodes` — `{nodes: [nodeView]}` — the global node registry, newest
   advert first. Each node carries its `networks` set and its own rolling
   `latestAdverts` list.
