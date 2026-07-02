@@ -1128,6 +1128,9 @@ func (s *Server) mergedSearch(p MapParams, limit int) (results []SearchResult, t
 		if p.HasNear && r.HasGPS {
 			r.DistanceKM = haversineKM(p.NearLat, p.NearLon, r.Lat, r.Lon)
 		}
+		if s.observers != nil && s.observers.Has(r.PubKey) {
+			r.IsObserver = true
+		}
 		seen[r.PubKey] = true
 		all = append(all, scored{r, rankMatch(r.Name, r.PubKey, q)})
 	}
@@ -1140,6 +1143,9 @@ func (s *Server) mergedSearch(p MapParams, limit int) (results []SearchResult, t
 			r := importedSearchResult(in)
 			if p.HasNear && r.HasGPS {
 				r.DistanceKM = haversineKM(p.NearLat, p.NearLon, r.Lat, r.Lon)
+			}
+			if s.observers != nil && s.observers.Has(in.PublicKey) {
+				r.IsObserver = true
 			}
 			seen[in.PublicKey] = true
 			all = append(all, scored{r, rankMatch(in.AdvName, in.PublicKey, q)})

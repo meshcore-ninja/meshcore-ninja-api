@@ -454,6 +454,9 @@ type SearchResult struct {
 	// Source is "live" (observed by our analyzers) or "map" (only known from the
 	// mirrored map.meshcore.io directory). Lets the UI flag directory-only hits.
 	Source string `json:"source,omitempty"`
+	// IsObserver is true when this node also reports packets as an observer, so the
+	// UI can badge it in result lists.
+	IsObserver bool `json:"isObserver,omitempty"`
 }
 
 // searchRank scores how well a node matches the query for ordering: lower is

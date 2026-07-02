@@ -133,6 +133,18 @@ func (r *ObserverRegistry) Lookup(observerID string) (ObserverView, bool) {
 	}, true
 }
 
+// Has reports whether the given node (by public key) is a known observer. It is
+// a cheap membership check for badging search results.
+func (r *ObserverRegistry) Has(observerID string) bool {
+	observerID = canonObserverID(observerID)
+	if observerID == "" {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.observers[observerID] != nil
+}
+
 // Export captures every observer row for persistence, deep-copying slices so
 // callers can serialize them outside the lock.
 func (r *ObserverRegistry) Export() []ObserverRecord {
