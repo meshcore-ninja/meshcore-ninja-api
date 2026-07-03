@@ -141,14 +141,28 @@ func TestLinkDifferentPathsSameHash(t *testing.T) {
 	}
 }
 
-// 5. A repeated link inside one path counts once for that packet.
+// 5. A link repeated in the SAME direction inside one path counts once, but a
+// link crossed in BOTH directions (as in a return trace) counts once per
+// direction so each direction's activity and SNR are preserved.
 func TestLinkRepeatedWithinPath(t *testing.T) {
 	a, b, c := pk(1), pk(2), pk(3)
+
+	// Opposite directions within one path: B→C then C→B are distinct hops.
 	reg := noDecay()
-	// Path A→B→C→B: B—C appears twice (C—B == B—C).
 	reg.ObservePath("hashX", "net-a", []string{a, b, c, b}, 100)
-	if l := mustNeighbor(t, reg, b, c); l.PacketCount != 1 {
-		t.Errorf("B—C count = %d, want 1 (deduped within path)", l.PacketCount)
+	l := mustNeighbor(t, reg, b, c)
+	if l.PacketCount != 2 {
+		t.Errorf("B—C count = %d, want 2 (one per direction)", l.PacketCount)
+	}
+	if l.SentByNode != 1 || l.RecvByNode != 1 {
+		t.Errorf("B—C direction counts sent=%d recv=%d, want 1/1", l.SentByNode, l.RecvByNode)
+	}
+
+	// Same direction repeated within one path (A→B twice) still counts once.
+	reg2 := noDecay()
+	reg2.ObservePath("hashY", "net-a", []string{a, b, a, b}, 100)
+	if l := mustNeighbor(t, reg2, a, b); l.SentByNode != 1 {
+		t.Errorf("A→B sent count = %d, want 1 (same-direction repeat deduped)", l.SentByNode)
 	}
 }
 

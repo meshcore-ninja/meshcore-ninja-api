@@ -153,6 +153,35 @@ func TestLinkPartialTraceSNRDoesNotAttachToFirstPathLink(t *testing.T) {
 	}
 }
 
+// TestLinkReturnTraceRecordsBothDirections covers a --return trace whose resolved
+// path revisits the same link in the opposite direction (mc→milos→mc). The two
+// legs are the same undirected link but carry distinct directional SNRs, so both
+// must be recorded rather than collapsed by within-path dedup.
+func TestLinkReturnTraceRecordsBothDirections(t *testing.T) {
+	mc, milos := pk(0x25), pk(0x51)
+	reg := noDecay()
+
+	// SNRs[0] is the origin sample (into mc) and is skipped; SNRs[1] is the
+	// mc→milos leg (-6.25), SNRs[2] the milos→mc return leg (+6.25).
+	reg.ObservePathCtx(PathObservation{
+		Hash: "return-trace",
+		Path: []string{mc, milos, mc},
+		SNRs: []float64{11.75, -6.25, 6.25},
+		Now:  100,
+	})
+
+	l := mustNeighbor(t, reg, mc, milos)
+	if l.SentByNode != 1 || l.RecvByNode != 1 {
+		t.Errorf("mc—milos direction counts: sent=%d recv=%d, want 1/1", l.SentByNode, l.RecvByNode)
+	}
+	if !l.HasSNRSentByNode || l.LastSNRSentByNode != -6.25 {
+		t.Errorf("mc→milos snr: has=%v val=%.2f, want true/-6.25", l.HasSNRSentByNode, l.LastSNRSentByNode)
+	}
+	if !l.HasSNRRecvByNode || l.LastSNRRecvByNode != 6.25 {
+		t.Errorf("milos→mc snr: has=%v val=%.2f, want true/6.25", l.HasSNRRecvByNode, l.LastSNRRecvByNode)
+	}
+}
+
 // TestLinkPositionSegments checks positions are stamped from PosOf and that a
 // move beyond the epsilon freezes a historical segment.
 func TestLinkPositionSegments(t *testing.T) {

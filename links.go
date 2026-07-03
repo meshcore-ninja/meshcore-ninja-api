@@ -38,6 +38,12 @@ type pubKey [32]byte
 // directly as a map key, with no per-event string concatenation or allocation.
 type linkKey [64]byte
 
+// directedKey identifies an ordered (from→to) adjacency: the two node public keys
+// in propagation order, without canonicalization. It is used only for per-path
+// dedup, where the two directions of a link must stay distinct so a return trace
+// (A→B…→B→A) records each direction's SNR instead of collapsing to one.
+type directedKey [64]byte
+
 // normalizePub validates and decodes a public key from hex. Keys are 32-byte
 // Ed25519 keys (64 hex chars); anything else is rejected.
 func normalizePub(s string) (pubKey, bool) {
@@ -158,17 +164,21 @@ type LinkRecord struct {
 }
 
 // linkDedupKey is the global packet-link deduplication key: (packet content
-// hash, canonical link). It deliberately excludes network and observer ids so the
-// same packet reported by multiple observers, or across multiple networks, counts
-// the link's activity only once.
+// hash, canonical link, direction). It deliberately excludes network and observer
+// ids so the same packet reported by multiple observers, or across multiple
+// networks, counts the link's activity only once. Direction is included so a
+// return trace, which crosses one link in both directions under a single hash,
+// counts each direction once instead of dropping the reverse leg.
 type linkDedupKey struct {
-	hash string
-	key  linkKey
+	hash    string
+	key     linkKey
+	fromIsA bool
 }
 
 type linkNetworkDedupKey struct {
 	hash      string
 	key       linkKey
+	fromIsA   bool
 	networkID string
 }
 
@@ -268,7 +278,7 @@ func (r *LinkRegistry) ObservePathCtx(o PathObservation) {
 	var havePrev bool
 	var prevRaw string
 	hop := 0 // count of accepted (normalized, de-duplicated) nodes so far
-	seen := make(map[linkKey]struct{})
+	seen := make(map[directedKey]struct{})
 
 	for _, raw := range o.Path {
 		raw = strings.ToLower(strings.TrimSpace(raw))
@@ -289,8 +299,16 @@ func (r *LinkRegistry) ObservePathCtx(o PathObservation) {
 		}
 		if havePrev {
 			if key, ok := canonicalKey(prev, cur); ok {
-				if _, dup := seen[key]; !dup {
-					seen[key] = struct{}{}
+				// Dedup within this path on the DIRECTED (from→to) pair, not the
+				// undirected canonical key. A return trace carries the same link in
+				// both directions, each with its own directional SNR; deduping on the
+				// undirected key would drop the reverse leg and lose that SNR. A link
+				// repeated in the same direction within one path is still deduped.
+				var dir directedKey
+				copy(dir[:32], prev[:])
+				copy(dir[32:], cur[:])
+				if _, dup := seen[dir]; !dup {
+					seen[dir] = struct{}{}
 					obs := linkObs{
 						key:       key,
 						fromIsA:   bytes.Equal(key[:32], prev[:]), // prev is canonical NodeA?
@@ -382,7 +400,7 @@ func (r *LinkRegistry) observeLink(o linkObs) {
 	if o.networkID != "" {
 		rec.addNetwork(o.networkID, o.now)
 		rec.dirty = true
-		ndk := linkNetworkDedupKey{hash: o.hash, key: o.key, networkID: o.networkID}
+		ndk := linkNetworkDedupKey{hash: o.hash, key: o.key, fromIsA: o.fromIsA, networkID: o.networkID}
 		if _, dup := sh.netDedup[ndk]; dup {
 			sh.netDedup[ndk] = o.now
 		} else {
@@ -392,7 +410,7 @@ func (r *LinkRegistry) observeLink(o linkObs) {
 		}
 	}
 
-	dk := linkDedupKey{hash: o.hash, key: o.key}
+	dk := linkDedupKey{hash: o.hash, key: o.key, fromIsA: o.fromIsA}
 	if _, dup := sh.dedup[dk]; dup {
 		sh.dedup[dk] = o.now // refresh so an actively-reflooded packet stays deduped
 		return
